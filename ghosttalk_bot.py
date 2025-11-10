@@ -16,11 +16,13 @@ from telebot import types
 
 # -------- CONFIG --------
 # to start = python ghosttalk_bot.py
-API_TOKEN = "8243912451:AAGTUqTfZF7H7Roxku1GhBZLGzL_Bl6V0TM"
+import os
+API_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "local-fallback-if-any"
+bot = telebot.TeleBot(API_TOKEN)
 BOT_USERNAME = "SayNymBot"
 ADMIN_ID = 8361006824
 OWNER_ID = 8361006824
-DB_PATH = "ghosttalk_fixed.db"
+DB_PATH = os.getenv("DB_PATH", "ghosttalk_fixed.db")
 
 WARNING_LIMIT = 3
 TEMP_BAN_HOURS = 24
