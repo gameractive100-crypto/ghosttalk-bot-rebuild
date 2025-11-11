@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
 """
-GhostTalk Complete - FINAL PERFECT VERSION
-All features working 100% - Media Approval, Gender, Ban System
+GhostTalk Bot - COMPLETE FIXED VERSION
+All bugs fixed, ready for production deployment
 """
 
+import os
 import sqlite3
 import random
 import logging
 import re
+import threading
+import time
+import secrets
 from datetime import datetime, timedelta
-import time, secrets
 
 import telebot
 from telebot import types
 
 # -------- CONFIG --------
-# to start = python ghosttalk_bot.py
-import os
-API_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "local-fallback-if-any"
-bot = telebot.TeleBot(API_TOKEN)
+API_TOKEN = os.getenv("BOT_TOKEN")
+if not API_TOKEN:
+    raise ValueError("❌ FATAL ERROR: BOT_TOKEN environment variable not set!")
+
+ADMIN_ID = int(os.getenv("ADMIN_ID", "8361006824"))
+OWNER_ID = int(os.getenv("OWNER_ID", "8361006824"))
 BOT_USERNAME = "SayNymBot"
-ADMIN_ID = 8361006824
-OWNER_ID = 8361006824
 DB_PATH = os.getenv("DB_PATH", "ghosttalk_fixed.db")
 
 WARNING_LIMIT = 3
@@ -37,10 +40,17 @@ LINK_PATTERN = re.compile(r'(http[s]?://|www\.)\S+', re.IGNORECASE)
 BANNED_PATTERNS = [re.compile(rf'\b{re.escape(w)}\b', re.IGNORECASE) for w in BANNED_WORDS]
 
 # -------- LOGGING --------
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
+# -------- BOT INITIALIZATION (ONLY ONCE) --------
 bot = telebot.TeleBot(API_TOKEN)
+
+# -------- THREAD SAFETY --------
+matching_lock = threading.Lock()
 
 # -------- RUNTIME DATA --------
 waiting_random = []
@@ -48,7 +58,7 @@ waiting_male = []
 waiting_female = []
 active_pairs = {}
 user_warnings = {}
-pending_media = {}  # token -> {sender, partner, media_type, file_id, ...}
+pending_media = {}
 
 # -------- DATABASE --------
 def get_conn():
@@ -88,7 +98,10 @@ def init_db():
 
 def db_get_user(user_id):
     with get_conn() as conn:
-        row = conn.execute("SELECT user_id, username, first_name, gender, messages_sent, media_approved, media_rejected, referral_code, referral_count FROM users WHERE user_id=?", (user_id,)).fetchone()
+        row = conn.execute(
+            "SELECT user_id, username, first_name, gender, messages_sent, media_approved, media_rejected, referral_code, referral_count FROM users WHERE user_id=?",
+            (user_id,)
+        ).fetchone()
         if not row:
             return None
         return {
@@ -107,7 +120,7 @@ def db_create_user_if_missing(user):
     uid = user.id
     if db_get_user(uid):
         return
-    ref_code = f"REF{uid}{random.randint(10000,99999)}"
+    ref_code = f"REF{uid}{random.randint(10000, 99999)}"
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO users (user_id, username, first_name, gender, joined_at, referral_code) VALUES (?, ?, ?, ?, ?, ?)",
@@ -120,7 +133,6 @@ def db_set_gender(user_id, gender):
         conn.execute("UPDATE users SET gender=? WHERE user_id=?", (gender, user_id))
         conn.commit()
 
-# NEW: set media sharing permission (when partner accepts)
 def db_set_media_sharing(user_id, allow: bool):
     with get_conn() as conn:
         if allow:
@@ -149,10 +161,16 @@ def db_is_banned(user_id):
 def db_ban_user(user_id, hours=None, permanent=False, reason=""):
     with get_conn() as conn:
         if permanent:
-            conn.execute("INSERT OR REPLACE INTO bans (user_id, ban_until, permanent, reason) VALUES (?, ?, ?, ?)", (user_id, None, 1, reason))
+            conn.execute(
+                "INSERT OR REPLACE INTO bans (user_id, ban_until, permanent, reason) VALUES (?, ?, ?, ?)",
+                (user_id, None, 1, reason)
+            )
         else:
             until = (datetime.utcnow() + timedelta(hours=hours)).isoformat() if hours else None
-            conn.execute("INSERT OR REPLACE INTO bans (user_id, ban_until, permanent, reason) VALUES (?, ?, ?, ?)", (user_id, until, 0, reason))
+            conn.execute(
+                "INSERT OR REPLACE INTO bans (user_id, ban_until, permanent, reason) VALUES (?, ?, ?, ?)",
+                (user_id, until, 0, reason)
+            )
         conn.commit()
 
 def db_unban_user(user_id):
@@ -207,7 +225,10 @@ def warn_user(user_id, reason):
         user_warnings[user_id] = 0
 
         try:
-            bot.send_message(user_id, f"🚫 BANNED - {TEMP_BAN_HOURS} hours\n\nReason: {reason}\n\nBan will be lifted automatically.")
+            bot.send_message(
+                user_id,
+                f"🚫 BANNED - {TEMP_BAN_HOURS} hours\n\nReason: {reason}\n\nBan will be lifted automatically."
+            )
         except:
             pass
 
@@ -216,7 +237,10 @@ def warn_user(user_id, reason):
         return "ban"
     else:
         try:
-            bot.send_message(user_id, f"⚠️ WARNING {count}/{WARNING_LIMIT}\n\nReason: {reason}\n\n{WARNING_LIMIT - count} more warnings = BAN!")
+            bot.send_message(
+                user_id,
+                f"⚠️ WARNING {count}/{WARNING_LIMIT}\n\nReason: {reason}\n\n{WARNING_LIMIT - count} more warnings = BAN!"
+            )
         except:
             pass
         return "warn"
@@ -251,7 +275,6 @@ def remove_from_queues(user_id):
 def disconnect_user(user_id):
     global active_pairs, pending_media
     if user_id in pending_media:
-        # remove any pending entries where this user is sender
         tokens = [t for t, meta in list(pending_media.items()) if meta.get("sender") == user_id or meta.get("partner") == user_id]
         for t in tokens:
             try:
@@ -284,7 +307,6 @@ def chat_keyboard():
     kb.add("🛑 Stop")
     return kb
 
-# -------- REPORT TYPES --------
 def report_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
@@ -296,11 +318,9 @@ def report_keyboard():
     )
     return markup
 
-# ---------------------------
-# MEDIA TOKEN GENERATOR
-# ---------------------------
+# -------- MEDIA TOKEN GENERATOR --------
 def generate_media_token(sender_id):
-    return f"{sender_id}:{int(time.time()*1000)}:{secrets.token_hex(4)}"
+    return f"{sender_id}_{int(time.time() * 1000)}_{secrets.token_hex(4)}"
 
 # -------- COMMANDS --------
 @bot.message_handler(commands=["start"])
@@ -528,7 +548,6 @@ def callback_report(call):
 
     bot.send_message(uid, "✅ Your report has been submitted. Admins will review it soon.")
 
-    # Admin notification
     try:
         admin_msg = f"""⚠️ NEW REPORT
 
@@ -548,7 +567,6 @@ Or permanent:
 
 @bot.message_handler(commands=["ban"])
 def cmd_ban(message):
-    logger.info(f"cmd_ban invoked by {message.from_user.id} text={message.text}")
     if message.from_user.id != ADMIN_ID:
         bot.send_message(message.from_user.id, "❌ You are not admin")
         return
@@ -636,35 +654,45 @@ def cmd_unban(message):
 def match_users():
     global waiting_random, waiting_male, waiting_female, active_pairs
 
-    if len(waiting_random) >= 2:
-        u1 = waiting_random.pop(0)
-        u2 = waiting_random.pop(0)
-        active_pairs[u1] = u2
-        active_pairs[u2] = u1
+    with matching_lock:
+        if len(waiting_random) >= 2:
+            u1 = waiting_random.pop(0)
+            u2 = waiting_random.pop(0)
+            active_pairs[u1] = u2
+            active_pairs[u2] = u1
 
-        msg = "✅ Partner Found!\n\n💬 Chat Tips:\n• Be respectful\n• Be honest\n• No vulgar words\n• No links/spam\n• Have fun!"
-        bot.send_message(u1, msg, reply_markup=chat_keyboard())
-        bot.send_message(u2, msg, reply_markup=chat_keyboard())
+            msg = "✅ Partner Found!\n\n💬 Chat Tips:\n• Be respectful\n• Be honest\n• No vulgar words\n• No links/spam\n• Have fun!"
+            try:
+                bot.send_message(u1, msg, reply_markup=chat_keyboard())
+                bot.send_message(u2, msg, reply_markup=chat_keyboard())
+            except Exception as e:
+                logger.error(f"Error notifying matched users: {e}")
 
-    if len(waiting_male) >= 2:
-        u1 = waiting_male.pop(0)
-        u2 = waiting_male.pop(0)
-        active_pairs[u1] = u2
-        active_pairs[u2] = u1
+        if len(waiting_male) >= 2:
+            u1 = waiting_male.pop(0)
+            u2 = waiting_male.pop(0)
+            active_pairs[u1] = u2
+            active_pairs[u2] = u1
 
-        msg = "✅ Male Partner Found!\n\n💬 Chat Tips:\n• Be respectful\n• Be honest\n• No vulgar words\n• No links/spam\n• Have fun!"
-        bot.send_message(u1, msg, reply_markup=chat_keyboard())
-        bot.send_message(u2, msg, reply_markup=chat_keyboard())
+            msg = "✅ Male Partner Found!\n\n💬 Chat Tips:\n• Be respectful\n• Be honest\n• No vulgar words\n• No links/spam\n• Have fun!"
+            try:
+                bot.send_message(u1, msg, reply_markup=chat_keyboard())
+                bot.send_message(u2, msg, reply_markup=chat_keyboard())
+            except Exception as e:
+                logger.error(f"Error notifying matched users: {e}")
 
-    if len(waiting_female) >= 2:
-        u1 = waiting_female.pop(0)
-        u2 = waiting_female.pop(0)
-        active_pairs[u1] = u2
-        active_pairs[u2] = u1
+        if len(waiting_female) >= 2:
+            u1 = waiting_female.pop(0)
+            u2 = waiting_female.pop(0)
+            active_pairs[u1] = u2
+            active_pairs[u2] = u1
 
-        msg = "✅ Female Partner Found!\n\n💬 Chat Tips:\n• Be respectful\n• Be honest\n• No vulgar words\n• No links/spam\n• Have fun!"
-        bot.send_message(u1, msg, reply_markup=chat_keyboard())
-        bot.send_message(u2, msg, reply_markup=chat_keyboard())
+            msg = "✅ Female Partner Found!\n\n💬 Chat Tips:\n• Be respectful\n• Be honest\n• No vulgar words\n• No links/spam\n• Have fun!"
+            try:
+                bot.send_message(u1, msg, reply_markup=chat_keyboard())
+                bot.send_message(u2, msg, reply_markup=chat_keyboard())
+            except Exception as e:
+                logger.error(f"Error notifying matched users: {e}")
 
 # -------- TEXT HANDLER --------
 @bot.message_handler(func=lambda m: m.content_type == "text" and not m.text.startswith("/"))
@@ -678,7 +706,6 @@ def handler_text(m):
 
     db_create_user_if_missing(m.from_user)
 
-    # Button handlers
     if m.text == "💬 Tips":
         bot.send_message(uid, """💬 CHAT TIPS:
 
@@ -718,12 +745,10 @@ def handler_text(m):
         cmd_stop(m)
         return
 
-    # Check banned content
     if is_banned_content(m.text):
         warn_user(uid, "Vulgar words or links")
         return
 
-    # Send to partner
     if uid in active_pairs:
         partner = active_pairs[uid]
         try:
@@ -737,7 +762,7 @@ def handler_text(m):
     else:
         bot.send_message(uid, "❌ Not connected. Use search commands.", reply_markup=main_keyboard())
 
-# -------- MEDIA HANDLER (CONSENT-BASED) --------
+# -------- MEDIA HANDLER --------
 @bot.message_handler(content_types=['photo', 'document', 'video', 'animation', 'sticker'])
 def handle_media(m):
     auto_unban()
@@ -754,7 +779,6 @@ def handle_media(m):
     partner = active_pairs[uid]
     media_type = m.content_type
 
-    # Get media ID
     if media_type == 'photo':
         media_id = m.photo[-1].file_id
     elif media_type == 'document':
@@ -768,7 +792,6 @@ def handle_media(m):
     else:
         return
 
-    # If sender already allowed earlier -> forward immediately
     u = db_get_user(uid)
     if u and u["media_approved"] and int(u["media_approved"]) > 0:
         try:
@@ -779,11 +802,10 @@ def handle_media(m):
             elif media_type == 'sticker': bot.send_sticker(partner, media_id)
             db_increment_media(uid, "approved")
         except Exception as e:
-            logger.error(f"Error forwarding media (auto-allowed): {e}")
+            logger.error(f"Error forwarding media: {e}")
             bot.send_message(uid, "❌ Could not forward media")
         return
 
-    # create unique token and save metadata (consent pending)
     token = generate_media_token(uid)
     pending_media[token] = {
         "sender": uid,
@@ -793,7 +815,6 @@ def handle_media(m):
         "timestamp": datetime.utcnow().isoformat()
     }
 
-    # Send consent request to partner (NO file preview)
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton("✅ Accept", callback_data=f"app:{token}"),
@@ -810,7 +831,7 @@ def handle_media(m):
         bot.send_message(uid, "❌ Could not request consent from partner.")
         if token in pending_media: del pending_media[token]
 
-# -------- MEDIA CALLBACKS (CONSENT HANDLING) --------
+# -------- MEDIA CALLBACKS --------
 @bot.callback_query_handler(func=lambda c: c.data.startswith("app:"))
 def approve_media_cb(call):
     try:
@@ -825,7 +846,6 @@ def approve_media_cb(call):
         media_type = meta["media_type"]
         file_id = meta["file_id"]
 
-        # Deliver the actual media to the partner now
         try:
             if media_type == 'photo':
                 bot.send_photo(partner_id, file_id, caption="📸 Media delivered (accepted).")
@@ -838,7 +858,7 @@ def approve_media_cb(call):
             elif media_type == 'sticker':
                 bot.send_sticker(partner_id, file_id)
         except Exception as e:
-            logger.error(f"Error delivering media on accept: {e}")
+            logger.error(f"Error delivering media: {e}")
             try: bot.send_message(partner_id, "❌ Could not deliver the media.")
             except: pass
             try: bot.send_message(sender_id, "❌ Your media could not be delivered after accept.")
@@ -847,20 +867,17 @@ def approve_media_cb(call):
             bot.answer_callback_query(call.id, "❌ Error delivering media", show_alert=True)
             return
 
-        # mark sharing allowed for future
         try:
             db_set_media_sharing(sender_id, True)
             db_increment_media(sender_id, "approved")
         except:
             pass
 
-        # Notify sender
         try:
             bot.send_message(sender_id, f"✅ Your {media_type} was ACCEPTED by partner and delivered.")
         except:
             pass
 
-        # Edit consent message to reflect accepted and remove buttons
         try:
             chat_id = meta.get("consent_chat_id", call.message.chat.id)
             msg_id = meta.get("consent_message_id", call.message.message_id)
@@ -891,14 +908,12 @@ def reject_media_cb(call):
         partner_id = meta["partner"]
         media_type = meta["media_type"]
 
-        # Notify sender about rejection (do NOT mark permanent block)
         try:
             bot.send_message(sender_id, f"❌ Your {media_type} was REJECTED by partner. It was not delivered.")
             db_increment_media(sender_id, "rejected")
         except:
             pass
 
-        # Edit consent message to show rejection and remove buttons
         try:
             chat_id = meta.get("consent_chat_id", call.message.chat.id)
             msg_id = meta.get("consent_message_id", call.message.message_id)
@@ -923,9 +938,35 @@ if __name__ == "__main__":
     logger.info(f"Admin ID: {ADMIN_ID}")
     logger.info(f"Bot username: @{BOT_USERNAME}")
 
-    try:
-        bot.infinity_polling(timeout=60)
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
+    retry_count = 0
+    max_retries = 5
+    retry_delay = 5
+
+    while retry_count < max_retries:
+        try:
+            logger.info(f"🚀 Starting polling (attempt {retry_count + 1}/{max_retries})")
+            bot.infinity_polling(timeout=60, long_polling_timeout=30)
+
+        except KeyboardInterrupt:
+            logger.info("Bot stopped by user")
+            break
+
+        except telebot.apihelper.ApiTelegramException as e:
+            logger.error(f"Telegram API Error: {e}")
+            retry_count += 1
+            if retry_count < max_retries:
+                logger.info(f"⏳ Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60)
+            else:
+                logger.error(f"❌ Max retries ({max_retries}) reached. Stopping bot.")
+
+        except Exception as e:
+            logger.error(f"Unexpected error: {e}")
+            retry_count += 1
+            if retry_count < max_retries:
+                logger.info(f"⏳ Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60)
+            else:
+                logger.error(f"❌ Max retries ({max_retries}) reached. Stopping bot.")
