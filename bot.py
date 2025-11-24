@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """
-GhostTalk - polling-only final version (Flask removed)
-Copy this file as bot.py
+GhostTalk - webhook-ready complete bot.py
+Features:
+- Webhook (Flask) for Render
+- Matching (random/male/female)
+- /next, /stop, /search_x commands
+- Media consent flow (tokens, approve/reject)
+- DB (sqlite) with users, bans, reports
+- auto-unban background thread
+- keep-alive pinger
+- /me and /status debug commands
 """
 
 import os
@@ -14,24 +22,26 @@ import time
 import secrets
 import threading
 import urllib.request
+import json
 
 import telebot
 from telebot import types
+from flask import Flask, request, abort
 
-# -------- CONFIG --------
-API_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or None
-if not API_TOKEN:
+# -------- CONFIG (ENV) --------
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN not set in environment. Set BOT_TOKEN before running.")
 
 BOT_USERNAME = os.getenv("BOT_USERNAME", "SayNymBot")
-ADMIN_ID = int(os.getenv("ADMIN_ID") or os.getenv("OWNER_ID") or "8361006824")
+ADMIN_ID = int(os.getenv("ADMIN_ID") or "8361006824")
 OWNER_ID = int(os.getenv("OWNER_ID") or str(ADMIN_ID))
 DB_PATH = os.getenv("DB_PATH", "ghosttalk_fixed.db")
+SELF_URL = os.getenv("SELF_URL")  # required for webhook registration and optional pings
 
 WARNING_LIMIT = int(os.getenv("WARNING_LIMIT", "3"))
 TEMP_BAN_HOURS = int(os.getenv("TEMP_BAN_HOURS", "24"))
 
-SELF_URL = os.getenv("SELF_URL", None)  # optional: public URL to ping (not required)
 PING_INTERVAL = int(os.getenv("PING_INTERVAL", "600"))  # seconds
 AUTO_UNBAN_INTERVAL = int(os.getenv("AUTO_UNBAN_INTERVAL", "300"))  # seconds
 
@@ -47,8 +57,9 @@ BANNED_PATTERNS = [re.compile(rf'\b{re.escape(w)}\b', re.IGNORECASE) for w in BA
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# -------- TELEGRAM BOT (single init) --------
-bot = telebot.TeleBot(API_TOKEN)
+# -------- TELEGRAM BOT + FLASK --------
+bot = telebot.TeleBot(BOT_TOKEN)
+app = Flask(__name__)
 
 # -------- RUNTIME DATA --------
 waiting_random = []
@@ -212,19 +223,17 @@ def warn_user(user_id, reason):
     if count >= WARNING_LIMIT:
         db_ban_user(user_id, hours=TEMP_BAN_HOURS, reason=reason)
         user_warnings[user_id] = 0
-
         try:
             bot.send_message(user_id, f"🚫 BANNED - {TEMP_BAN_HOURS} hours\n\nReason: {reason}\n\nBan will be lifted automatically.")
-        except Exception:
+        except:
             pass
-
         remove_from_queues(user_id)
         disconnect_user(user_id)
         return "ban"
     else:
         try:
             bot.send_message(user_id, f"⚠️ WARNING {count}/{WARNING_LIMIT}\n\nReason: {reason}\n\n{WARNING_LIMIT - count} more warnings = BAN!")
-        except Exception:
+        except:
             pass
         return "warn"
 
@@ -319,18 +328,22 @@ def report_keyboard():
 def generate_media_token(sender_id):
     return f"{sender_id}:{int(time.time()*1000)}:{secrets.token_hex(4)}"
 
-# ✅ KEEP-ALIVE PINGER SYSTEM (safe)
+# ---------------------------
+# KEEP-ALIVE PINGER
+# ---------------------------
 def keep_alive_pinger():
     def ping_loop():
         time.sleep(10)
         while True:
             try:
+                # ping admin
                 try:
                     bot.send_message(ADMIN_ID, f"🤖 Keep-Alive Ping\n⏰ {datetime.utcnow().strftime('%H:%M:%S UTC')}")
                     logger.info("✅ Self-ping sent to ADMIN")
                 except Exception as e:
                     logger.debug(f"Could not send admin ping: {e}")
 
+                # optional HTTP self-ping (if SELF_URL provided)
                 if SELF_URL:
                     try:
                         resp = urllib.request.urlopen(SELF_URL, timeout=10)
@@ -347,7 +360,80 @@ def keep_alive_pinger():
     thread.start()
     logger.info("🔄 Keep-alive pinger started (every %s seconds)", PING_INTERVAL)
 
-# -------- COMMANDS & HANDLERS --------
+# -------- MATCHING (improved logging and safety) --------
+def match_users():
+    global waiting_random, waiting_male, waiting_female, active_pairs
+    logger.info(f"match_users called. queues sizes -> random:{len(waiting_random)} male:{len(waiting_male)} female:{len(waiting_female)}")
+
+    try:
+        # random pool
+        while len(waiting_random) >= 2:
+            u1 = waiting_random.pop(0)
+            u2 = waiting_random.pop(0)
+            active_pairs[u1] = u2
+            active_pairs[u2] = u1
+            msg = "✅ Partner Found!\n\n💬 Chat Tips:\n• Be respectful\n• Be honest\n• No vulgar words\n• No links/spam\n• Have fun!"
+            try:
+                bot.send_message(u1, msg, reply_markup=chat_keyboard())
+                bot.send_message(u2, msg, reply_markup=chat_keyboard())
+                logger.info(f"Matched random {u1} <-> {u2}")
+            except Exception as e:
+                logger.error(f"Error sending partner found msg for {u1} or {u2}: {e}")
+                active_pairs.pop(u1, None)
+                active_pairs.pop(u2, None)
+                # attempt to requeue safety
+                try:
+                    remove_from_queues(u1)
+                    remove_from_queues(u2)
+                except:
+                    pass
+
+        # male pool
+        while len(waiting_male) >= 2:
+            u1 = waiting_male.pop(0)
+            u2 = waiting_male.pop(0)
+            active_pairs[u1] = u2
+            active_pairs[u2] = u1
+            msg = "✅ Male Partner Found!\n\n💬 Chat Tips:\n• Be respectful\n• Be honest\n• No vulgar words\n• No links/spam\n• Have fun!"
+            try:
+                bot.send_message(u1, msg, reply_markup=chat_keyboard())
+                bot.send_message(u2, msg, reply_markup=chat_keyboard())
+                logger.info(f"Matched male {u1} <-> {u2}")
+            except Exception as e:
+                logger.error(f"Error sending male partner msg for {u1} or {u2}: {e}")
+                active_pairs.pop(u1, None)
+                active_pairs.pop(u2, None)
+                try:
+                    remove_from_queues(u1)
+                    remove_from_queues(u2)
+                except:
+                    pass
+
+        # female pool
+        while len(waiting_female) >= 2:
+            u1 = waiting_female.pop(0)
+            u2 = waiting_female.pop(0)
+            active_pairs[u1] = u2
+            active_pairs[u2] = u1
+            msg = "✅ Female Partner Found!\n\n💬 Chat Tips:\n• Be respectful\n• Be honest\n• No vulgar words\n• No links/spam\n• Have fun!"
+            try:
+                bot.send_message(u1, msg, reply_markup=chat_keyboard())
+                bot.send_message(u2, msg, reply_markup=chat_keyboard())
+                logger.info(f"Matched female {u1} <-> {u2}")
+            except Exception as e:
+                logger.error(f"Error sending female partner msg for {u1} or {u2}: {e}")
+                active_pairs.pop(u1, None)
+                active_pairs.pop(u2, None)
+                try:
+                    remove_from_queues(u1)
+                    remove_from_queues(u2)
+                except:
+                    pass
+
+    except Exception as e:
+        logger.error(f"match_users top-level error: {e}")
+
+# -------- HANDLERS --------
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     user = message.from_user
@@ -402,7 +488,6 @@ def callback_set_gender(call):
 def cmd_settings(message):
     uid = message.from_user.id
     u = db_get_user(uid)
-
     if not u:
         bot.send_message(uid, "Use /start first")
         return
@@ -423,18 +508,15 @@ def cmd_settings(message):
         types.InlineKeyboardButton("♂️ Male", callback_data="sex:male"),
         types.InlineKeyboardButton("♀️ Female", callback_data="sex:female")
     )
-
     bot.send_message(uid, text, reply_markup=markup)
 
 @bot.message_handler(commands=["refer"])
 def cmd_refer(message):
     uid = message.from_user.id
     u = db_get_user(uid)
-
     if not u:
         bot.send_message(uid, "Use /start first")
         return
-
     ref_link = db_get_referral_link(uid)
     text = f"""🎁 REFERRAL SYSTEM
 
@@ -453,27 +535,22 @@ def cmd_refer(message):
 
 
 ✅ Share and earn!"""
-
     bot.send_message(uid, text)
 
 @bot.message_handler(commands=["search_random"])
 def cmd_search_random(message):
     auto_unban()
     uid = message.from_user.id
-
     if db_is_banned(uid):
         bot.send_message(uid, "🚫 You are banned")
         return
-
     u = db_get_user(uid)
     if not u or not u["gender"]:
         bot.send_message(uid, "Set gender first using /settings")
         return
-
     if uid in active_pairs:
         bot.send_message(uid, "You are already in a chat. Use /next to find new partner.")
         return
-
     remove_from_queues(uid)
     waiting_random.append(uid)
     bot.send_message(uid, "🔍 Searching for random partner...\n⏳ Please wait")
@@ -483,20 +560,16 @@ def cmd_search_random(message):
 def cmd_search_male(message):
     auto_unban()
     uid = message.from_user.id
-
     if db_is_banned(uid):
         bot.send_message(uid, "🚫 You are banned")
         return
-
     u = db_get_user(uid)
     if not u or not u["gender"]:
         bot.send_message(uid, "Set gender first using /settings")
         return
-
     if uid in active_pairs:
         bot.send_message(uid, "You are already in a chat. Use /next to find new partner.")
         return
-
     remove_from_queues(uid)
     waiting_male.append(uid)
     bot.send_message(uid, "🔍 Searching for male partner...\n⏳ Please wait")
@@ -506,20 +579,16 @@ def cmd_search_male(message):
 def cmd_search_female(message):
     auto_unban()
     uid = message.from_user.id
-
     if db_is_banned(uid):
         bot.send_message(uid, "🚫 You are banned")
         return
-
     u = db_get_user(uid)
     if not u or not u["gender"]:
         bot.send_message(uid, "Set gender first using /settings")
         return
-
     if uid in active_pairs:
         bot.send_message(uid, "You are already in a chat. Use /next to find new partner.")
         return
-
     remove_from_queues(uid)
     waiting_female.append(uid)
     bot.send_message(uid, "🔍 Searching for female partner...\n⏳ Please wait")
@@ -538,7 +607,6 @@ def cmd_next(message):
     if uid not in active_pairs:
         bot.send_message(uid, "You're not in a chat. Use search commands first.")
         return
-
     disconnect_user(uid)
     bot.send_message(uid, "Looking for new partner...", reply_markup=main_keyboard())
     cmd_search_random(message)
@@ -549,20 +617,16 @@ def cmd_report(message):
     if uid not in active_pairs:
         bot.send_message(uid, "You need to be in an active chat to report.")
         return
-
     bot.send_message(uid, "📋 What type of abuse do you want to report?", reply_markup=report_keyboard())
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rep:"))
 def callback_report(call):
     uid = call.from_user.id
-
     if uid not in active_pairs:
         bot.answer_callback_query(call.id, "Not in chat", show_alert=True)
         return
-
     partner_id = active_pairs[uid]
     _, report_type = call.data.split(":")
-
     report_type_map = {
         "child": "👶 Child Abuse",
         "porn": "🔞 Pornography",
@@ -570,14 +634,10 @@ def callback_report(call):
         "scam": "🚨 Scam/Fraud",
         "other": "❌ Other"
     }
-
     report_type_name = report_type_map.get(report_type, "Other")
-
     db_add_report(uid, partner_id, report_type, report_type_name)
     bot.answer_callback_query(call.id, "✅ Report submitted", show_alert=True)
-
     bot.send_message(uid, "✅ Your report has been submitted. Admins will review it soon.")
-
     try:
         admin_msg = f"""⚠️ NEW REPORT
 
@@ -604,11 +664,9 @@ def cmd_ban(message):
     if message.from_user.id != ADMIN_ID:
         bot.send_message(message.from_user.id, "❌ You are not admin")
         return
-
     try:
         text = message.text
         parts = text.split(maxsplit=3)
-
         if len(parts) < 2:
             bot.reply_to(message, """Usage: /ban <user_id> [hours|permanent] [reason]
 
@@ -618,12 +676,10 @@ Examples:
 /ban 987654321 permanent Child abuse
 /ban 111111111 12 Spamming""")
             return
-
         target_id = int(parts[1])
         hours = 24
         permanent = False
         reason = "Banned by admin"
-
         if len(parts) >= 3:
             if parts[2].lower() == "permanent":
                 permanent = True
@@ -633,12 +689,9 @@ Examples:
                     hours = int(parts[2])
                 except:
                     hours = 24
-
         if len(parts) >= 4:
             reason = parts[3]
-
         db_ban_user(target_id, hours=hours, permanent=permanent, reason=reason)
-
         if permanent:
             bot.reply_to(message, f"✅ User {target_id} PERMANENTLY BANNED.\n\nReason: {reason}")
             try:
@@ -651,7 +704,6 @@ Examples:
                 bot.send_message(target_id, f"🚫 You have been banned for {hours} hours.\n\nReason: {reason}\n\nBan will be lifted automatically.")
             except:
                 pass
-
         logger.info(f"Admin {message.from_user.id} banned user {target_id}")
     except ValueError:
         bot.reply_to(message, "❌ Invalid user ID. Must be a number.")
@@ -663,71 +715,33 @@ def cmd_unban(message):
     if message.from_user.id != ADMIN_ID:
         bot.send_message(message.from_user.id, "❌ You are not admin")
         return
-
     try:
         parts = message.text.split()
         if len(parts) < 2:
             bot.reply_to(message, "Usage: /unban <user_id>")
             return
-
         target_id = int(parts[1])
         db_unban_user(target_id)
         user_warnings[target_id] = 0
-
         bot.reply_to(message, f"✅ User {target_id} unbanned")
         try:
             bot.send_message(target_id, "✅ Your ban has been lifted! You can use the bot again.")
         except:
             pass
-
         logger.info(f"Admin {message.from_user.id} unbanned user {target_id}")
     except ValueError:
         bot.reply_to(message, "❌ Invalid user ID. Must be a number.")
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {str(e)}")
 
-def match_users():
-    global waiting_random, waiting_male, waiting_female, active_pairs
-
-    if len(waiting_random) >= 2:
-        u1 = waiting_random.pop(0)
-        u2 = waiting_random.pop(0)
-        active_pairs[u1] = u2
-        active_pairs[u2] = u1
-
-        msg = "✅ Partner Found!\n\n💬 Chat Tips:\n• Be respectful\n• Be honest\n• No vulgar words\n• No links/spam\n• Have fun\n• /next - /stop "
-        bot.send_message(u1, msg, reply_markup=chat_keyboard())
-        bot.send_message(u2, msg, reply_markup=chat_keyboard())
-
-    if len(waiting_male) >= 2:
-        u1 = waiting_male.pop(0)
-        u2 = waiting_male.pop(0)
-        active_pairs[u1] = u2
-        active_pairs[u2] = u1
-
-        msg = "✅ Male Partner Found!\n\n💬 Chat Tips:\n• Be respectful\n• Be honest\n• No vulgar words\n• No links/spam\n• Have fun!"
-        bot.send_message(u1, msg, reply_markup=chat_keyboard())
-        bot.send_message(u2, msg, reply_markup=chat_keyboard())
-
-    if len(waiting_female) >= 2:
-        u1 = waiting_female.pop(0)
-        u2 = waiting_female.pop(0)
-        active_pairs[u1] = u2
-        active_pairs[u2] = u1
-
-        msg = "✅ Female Partner Found!\n\n💬 Chat Tips:\n• Be respectful\n• Be honest\n• No vulgar words\n• No links/spam\n• Have fun!"
-        bot.send_message(u1, msg, reply_markup=chat_keyboard())
-        bot.send_message(u2, msg, reply_markup=chat_keyboard())
-
+# -------- TEXT & MEDIA HANDLERS --------
 @bot.message_handler(func=lambda m: m.content_type == "text" and not m.text.startswith("/"))
 def handler_text(m):
     auto_unban()
     uid = m.from_user.id
-
     if db_is_banned(uid):
         bot.send_message(uid, "🚫 You are banned")
         return
-
     db_create_user_if_missing(m.from_user)
 
     # Button handlers
@@ -793,19 +807,16 @@ def handler_text(m):
 def handle_media(m):
     auto_unban()
     uid = m.from_user.id
-
     if db_is_banned(uid):
         bot.send_message(uid, "🚫 You are banned")
         return
-
     if uid not in active_pairs:
         bot.send_message(uid, "❌ Not connected")
         return
-
     partner = active_pairs[uid]
     media_type = m.content_type
 
-    # Get media ID
+    # get file id
     if media_type == 'photo':
         media_id = m.photo[-1].file_id
     elif media_type == 'document':
@@ -819,7 +830,7 @@ def handle_media(m):
     else:
         return
 
-    # If sender already allowed earlier -> forward immediately
+    # auto-forward if sender allowed previously
     u = db_get_user(uid)
     if u and u["media_approved"] and int(u["media_approved"]) > 0:
         try:
@@ -834,7 +845,7 @@ def handle_media(m):
             bot.send_message(uid, "❌ Could not forward media")
         return
 
-    # create unique token and save metadata (consent pending)
+    # save pending with token
     token = generate_media_token(uid)
     pending_media[token] = {
         "sender": uid,
@@ -844,7 +855,6 @@ def handle_media(m):
         "timestamp": datetime.utcnow().isoformat()
     }
 
-    # Send consent request to partner (NO file preview)
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton("✅ Accept", callback_data=f"app:{token}"),
@@ -869,12 +879,10 @@ def approve_media_cb(call):
         if not meta:
             bot.answer_callback_query(call.id, "This media is no longer available.", show_alert=True)
             return
-
         sender_id = meta["sender"]
         partner_id = meta["partner"]
         media_type = meta["media_type"]
         file_id = meta["file_id"]
-
         try:
             if media_type == 'photo':
                 bot.send_photo(partner_id, file_id, caption="📸 Media delivered (accepted).")
@@ -895,18 +903,15 @@ def approve_media_cb(call):
             if token in pending_media: del pending_media[token]
             bot.answer_callback_query(call.id, "❌ Error delivering media", show_alert=True)
             return
-
         try:
             db_set_media_sharing(sender_id, True)
             db_increment_media(sender_id, "approved")
         except:
             pass
-
         try:
             bot.send_message(sender_id, f"✅ Your {media_type} was ACCEPTED by partner and delivered.")
         except:
             pass
-
         try:
             chat_id = meta.get("consent_chat_id", call.message.chat.id)
             msg_id = meta.get("consent_message_id", call.message.message_id)
@@ -916,10 +921,8 @@ def approve_media_cb(call):
                 bot.edit_message_text("✅ Partner accepted — media delivered.", call.message.chat.id, call.message.message_id)
             except:
                 pass
-
         bot.answer_callback_query(call.id, "✅ Media Approved", show_alert=False)
         if token in pending_media: del pending_media[token]
-
     except Exception as e:
         logger.error(f"Error in approve_media_cb: {e}")
         bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
@@ -932,17 +935,14 @@ def reject_media_cb(call):
         if not meta:
             bot.answer_callback_query(call.id, "This media is no longer available.", show_alert=True)
             return
-
         sender_id = meta["sender"]
         partner_id = meta["partner"]
         media_type = meta["media_type"]
-
         try:
             bot.send_message(sender_id, f"❌ Your {media_type} was REJECTED by partner. It was not delivered.")
             db_increment_media(sender_id, "rejected")
         except:
             pass
-
         try:
             chat_id = meta.get("consent_chat_id", call.message.chat.id)
             msg_id = meta.get("consent_message_id", call.message.message_id)
@@ -952,31 +952,88 @@ def reject_media_cb(call):
                 bot.edit_message_text("❌ Partner rejected this media. It was not delivered.", call.message.chat.id, call.message.message_id)
             except:
                 pass
-
         bot.answer_callback_query(call.id, "❌ Media Rejected", show_alert=False)
         if token in pending_media: del pending_media[token]
-
     except Exception as e:
         logger.error(f"Error in reject_media_cb: {e}")
         bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
 
-# -------- MAIN --------
+# -------- DEBUG COMMANDS --------
+@bot.message_handler(commands=["me"])
+def cmd_me(message):
+    uid = message.from_user.id
+    u = db_get_user(uid)
+    if not u:
+        bot.send_message(uid, "No user record. Use /start first.")
+        return
+    text = f"Your ID: {uid}\nUsername: {u.get('username')}\nFirst name: {u.get('first_name')}\nGender: {u.get('gender')}\nMessages sent: {u.get('messages_sent')}\nMedia approved: {u.get('media_approved')}\nMedia rejected: {u.get('media_rejected')}\nReferral: {u.get('referral_code')}\nReferred count: {u.get('referral_count')}"
+    bot.send_message(uid, text)
+
+@bot.message_handler(commands=["status"])
+def cmd_status(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.send_message(message.from_user.id, "❌ Not allowed")
+        return
+    try:
+        s = []
+        s.append(f"Queues sizes -> random:{len(waiting_random)} male:{len(waiting_male)} female:{len(waiting_female)}")
+        s.append(f"Active pairs count: {len(active_pairs)}")
+        s.append("First 10 waiting_random: " + ",".join(str(x) for x in waiting_random[:10]))
+        s.append("First 10 active pairs sample: " + ",".join(f"{k}:{v}" for k, v in list(active_pairs.items())[:10]))
+        bot.send_message(ADMIN_ID, "\n".join(s))
+    except Exception as e:
+        logger.error(f"status error: {e}")
+        bot.send_message(ADMIN_ID, f"Status error: {e}")
+
+# -------- FLASK ROUTES (webhook) --------
+@app.route('/', methods=['GET'])
+def health():
+    return "OK - GhostTalk bot running", 200
+
+@app.route('/set_webhook', methods=['GET'])
+def set_webhook():
+    if not SELF_URL:
+        return "SELF_URL not configured", 400
+    webhook_url = SELF_URL.rstrip("/") + "/webhook"
+    try:
+        ok = bot.set_webhook(url=webhook_url)
+        if ok:
+            return f"Webhook set: {webhook_url}", 200
+        else:
+            return f"Failed to set webhook to {webhook_url}", 500
+    except Exception as e:
+        logger.error(f"set_webhook error: {e}")
+        return f"Error: {e}", 500
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_str = request.get_data().decode('utf-8')
+        try:
+            update = telebot.types.Update.de_json(json.loads(json_str))
+            bot.process_new_updates([update])
+        except Exception as e:
+            logger.error(f"webhook processing error: {e} json:{json_str}")
+            return "ERR", 500
+        return "OK", 200
+    else:
+        abort(403)
+
+# -------- STARTUP --------
 if __name__ == "__main__":
     init_db()
-
-    # start auto-unban background thread
     start_auto_unban_thread()
-
-    # Start keep-alive pinger
     keep_alive_pinger()
+    # On start, if SELF_URL set, try to set webhook once (non-fatal)
+    if SELF_URL:
+        try:
+            webhook_url = SELF_URL.rstrip("/") + "/webhook"
+            bot.remove_webhook()
+            bot.set_webhook(url=webhook_url)
+            logger.info(f"Webhook registered: {webhook_url}")
+        except Exception as e:
+            logger.warning(f"Could not register webhook on startup: {e}")
 
-    logger.info("✅ Bot Started Successfully!")
-    logger.info(f"Admin ID: {ADMIN_ID}")
-    logger.info(f"Bot username: @{BOT_USERNAME}")
-
-    try:
-        bot.infinity_polling(timeout=60)
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
+    port = int(os.environ.get("PORT", "5000"))
+    logger.info("Bot ready; Flask starting on port %s", port)
+    app.run(host='0.0.0.0', port=port)
