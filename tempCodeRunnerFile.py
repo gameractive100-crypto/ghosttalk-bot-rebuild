@@ -1,0 +1,1 @@
+python "d:\telegram-bot\bot.py"
