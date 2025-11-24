@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-GhostTalk Complete - FINAL (checked + tiny safe fixes)
-- Minimal changes: safer ADMIN/OWNER parsing, safer SELF_URL ping, optional auto-unban thread.
-- Keeps your original logic intact (matching, media consent, DB, keyboards, /next).
+GhostTalk - polling-only final version (Flask removed)
+Copy this file as bot.py
 """
 
 import os
@@ -18,7 +17,6 @@ import urllib.request
 
 import telebot
 from telebot import types
-from flask import Flask
 
 # -------- CONFIG --------
 API_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or None
@@ -26,8 +24,6 @@ if not API_TOKEN:
     raise RuntimeError("BOT_TOKEN not set in environment. Set BOT_TOKEN before running.")
 
 BOT_USERNAME = os.getenv("BOT_USERNAME", "SayNymBot")
-
-# safer env parsing with defaults as strings
 ADMIN_ID = int(os.getenv("ADMIN_ID") or os.getenv("OWNER_ID") or "8361006824")
 OWNER_ID = int(os.getenv("OWNER_ID") or str(ADMIN_ID))
 DB_PATH = os.getenv("DB_PATH", "ghosttalk_fixed.db")
@@ -35,9 +31,9 @@ DB_PATH = os.getenv("DB_PATH", "ghosttalk_fixed.db")
 WARNING_LIMIT = int(os.getenv("WARNING_LIMIT", "3"))
 TEMP_BAN_HOURS = int(os.getenv("TEMP_BAN_HOURS", "24"))
 
-SELF_URL = os.getenv("SELF_URL", None)  # optional, e.g. https://your-app.onrender.com
-PING_INTERVAL = int(os.getenv("PING_INTERVAL", "600"))  # seconds (default 10 min)
-AUTO_UNBAN_INTERVAL = int(os.getenv("AUTO_UNBAN_INTERVAL", "300"))  # seconds (default 5 min)
+SELF_URL = os.getenv("SELF_URL", None)  # optional: public URL to ping (not required)
+PING_INTERVAL = int(os.getenv("PING_INTERVAL", "600"))  # seconds
+AUTO_UNBAN_INTERVAL = int(os.getenv("AUTO_UNBAN_INTERVAL", "300"))  # seconds
 
 # -------- BANNED WORDS / PATTERNS --------
 BANNED_WORDS = [
@@ -61,20 +57,6 @@ waiting_female = []
 active_pairs = {}
 user_warnings = {}
 pending_media = {}  # token -> {sender, partner, media_type, file_id, ...}
-
-# -------- FLASK app (health endpoint for Render) --------
-flask_app = Flask(__name__)
-
-@flask_app.route("/", methods=["GET"])
-def health():
-    return "OK - GhostTalk bot running", 200
-
-def run_flask():
-    port = int(os.environ.get("PORT", "10000"))
-    try:
-        flask_app.run(host="0.0.0.0", port=port)
-    except Exception as e:
-        logger.error(f"Flask thread failed: {e}")
 
 # -------- DATABASE --------
 def get_conn():
@@ -263,7 +245,6 @@ def auto_unban():
             except Exception:
                 pass
 
-# Optional background thread for auto_unban
 def start_auto_unban_thread():
     def loop():
         while True:
@@ -340,10 +321,6 @@ def generate_media_token(sender_id):
 
 # ✅ KEEP-ALIVE PINGER SYSTEM (safe)
 def keep_alive_pinger():
-    """
-    Sends periodic admin message and optionally hits SELF_URL.
-    NOTE: External uptime monitor (UptimeRobot) is recommended as self-ping may not run when host sleeps.
-    """
     def ping_loop():
         time.sleep(10)
         while True:
@@ -601,7 +578,6 @@ def callback_report(call):
 
     bot.send_message(uid, "✅ Your report has been submitted. Admins will review it soon.")
 
-    # Admin notification
     try:
         admin_msg = f"""⚠️ NEW REPORT
 
@@ -764,8 +740,7 @@ def handler_text(m):
 ✅ No links or spam
 ✅ No personal info sharing
 ✅ Have genuine conversations
-✅ Enjoy the experience!
- /next -  /stop""", reply_markup=chat_keyboard())
+✅ Enjoy the experience!    /next - /stop""", reply_markup=chat_keyboard())
         return
 
     if m.text == "📊 Stats":
@@ -900,7 +875,6 @@ def approve_media_cb(call):
         media_type = meta["media_type"]
         file_id = meta["file_id"]
 
-        # Deliver the actual media to the partner now
         try:
             if media_type == 'photo':
                 bot.send_photo(partner_id, file_id, caption="📸 Media delivered (accepted).")
@@ -922,20 +896,17 @@ def approve_media_cb(call):
             bot.answer_callback_query(call.id, "❌ Error delivering media", show_alert=True)
             return
 
-        # mark sharing allowed for future
         try:
             db_set_media_sharing(sender_id, True)
             db_increment_media(sender_id, "approved")
         except:
             pass
 
-        # Notify sender
         try:
             bot.send_message(sender_id, f"✅ Your {media_type} was ACCEPTED by partner and delivered.")
         except:
             pass
 
-        # Edit consent message to reflect accepted and remove buttons
         try:
             chat_id = meta.get("consent_chat_id", call.message.chat.id)
             msg_id = meta.get("consent_message_id", call.message.message_id)
@@ -966,14 +937,12 @@ def reject_media_cb(call):
         partner_id = meta["partner"]
         media_type = meta["media_type"]
 
-        # Notify sender about rejection (do NOT mark permanent block)
         try:
             bot.send_message(sender_id, f"❌ Your {media_type} was REJECTED by partner. It was not delivered.")
             db_increment_media(sender_id, "rejected")
         except:
             pass
 
-        # Edit consent message to show rejection and remove buttons
         try:
             chat_id = meta.get("consent_chat_id", call.message.chat.id)
             msg_id = meta.get("consent_message_id", call.message.message_id)
@@ -994,11 +963,6 @@ def reject_media_cb(call):
 # -------- MAIN --------
 if __name__ == "__main__":
     init_db()
-
-    # Start Flask health endpoint thread (so Render sees app on PORT)
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info("🔁 Flask health endpoint thread started")
 
     # start auto-unban background thread
     start_auto_unban_thread()
