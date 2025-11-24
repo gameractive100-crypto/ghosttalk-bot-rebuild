@@ -695,7 +695,7 @@ def match_users():
         active_pairs[u1] = u2
         active_pairs[u2] = u1
 
-        msg = "✅ Partner Found!\n\n💬 Chat Tips:\n• Be respectful\n• Be honest\n• No vulgar words\n• No links/spam\n• Have fun!"
+        msg = "✅ Partner Found!\n\n💬 Chat Tips:\n• Be respectful\n• Be honest\n• No vulgar words\n• No links/spam\n• Have fun\n• /next - /stop "
         bot.send_message(u1, msg, reply_markup=chat_keyboard())
         bot.send_message(u2, msg, reply_markup=chat_keyboard())
 
@@ -740,7 +740,7 @@ def handler_text(m):
 ✅ No links or spam
 ✅ No personal info sharing
 ✅ Have genuine conversations
-✅ Enjoy the experience!    /next - /stop""", reply_markup=chat_keyboard())
+✅ Enjoy the experience!""", reply_markup=chat_keyboard())
         return
 
     if m.text == "📊 Stats":
