@@ -1,49 +1,41 @@
 #!/usr/bin/env python3
 """
-GhostTalk Complete - FINAL (checked + tiny safe fixes)
-- Minimal changes: safer ADMIN/OWNER parsing, safer SELF_URL ping, optional auto-unban thread.
-- Keeps your original logic intact (matching, media consent, DB, keyboards, /next).
+GhostTalk Complete - RENDER DEPLOYMENT VERSION
+Flask + Telegram Polling + Keep-Alive System
 """
 
-import os
 import sqlite3
 import random
 import logging
 import re
 from datetime import datetime, timedelta
-import time
-import secrets
+import time, secrets
 import threading
-import urllib.request
+import os
 
 import telebot
 from telebot import types
 from flask import Flask
 
 # -------- CONFIG --------
-API_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or None
+API_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not API_TOKEN:
-    raise RuntimeError("BOT_TOKEN not set in environment. Set BOT_TOKEN before running.")
+    raise ValueError("BOT_TOKEN environment variable missing!")
 
-BOT_USERNAME = os.getenv("BOT_USERNAME", "SayNymBot")
-
-# safer env parsing with defaults as strings
-ADMIN_ID = int(os.getenv("ADMIN_ID") or os.getenv("OWNER_ID") or "8361006824")
-OWNER_ID = int(os.getenv("OWNER_ID") or str(ADMIN_ID))
+BOT_USERNAME = "SayNymBot"
+ADMIN_ID = 8361006824
+OWNER_ID = 8361006824
 DB_PATH = os.getenv("DB_PATH", "ghosttalk_fixed.db")
 
-WARNING_LIMIT = int(os.getenv("WARNING_LIMIT", "3"))
-TEMP_BAN_HOURS = int(os.getenv("TEMP_BAN_HOURS", "24"))
+WARNING_LIMIT = 3
+TEMP_BAN_HOURS = 24
 
-SELF_URL = os.getenv("SELF_URL", None)  # optional, e.g. https://your-app.onrender.com
-PING_INTERVAL = int(os.getenv("PING_INTERVAL", "600"))  # seconds (default 10 min)
-AUTO_UNBAN_INTERVAL = int(os.getenv("AUTO_UNBAN_INTERVAL", "300"))  # seconds (default 5 min)
-
-# -------- BANNED WORDS / PATTERNS --------
+# -------- BANNED WORDS --------
 BANNED_WORDS = [
     "fuck you", "sex chat", "pussy", "dick", "vagina", "penis",
     "chut", "lund", "bhosdi", "madarchod", "bc", "mc",
 ]
+
 LINK_PATTERN = re.compile(r'(http[s]?://|www\.)\S+', re.IGNORECASE)
 BANNED_PATTERNS = [re.compile(rf'\b{re.escape(w)}\b', re.IGNORECASE) for w in BANNED_WORDS]
 
@@ -51,8 +43,17 @@ BANNED_PATTERNS = [re.compile(rf'\b{re.escape(w)}\b', re.IGNORECASE) for w in BA
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# -------- TELEGRAM BOT (single init) --------
+# -------- FLASK APP (RENDER PORT BINDING) --------
+app = Flask(__name__)
 bot = telebot.TeleBot(API_TOKEN)
+
+@app.route('/')
+def home():
+    return "✅ GhostTalk Bot is Running!", 200
+
+@app.route('/health')
+def health():
+    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}, 200
 
 # -------- RUNTIME DATA --------
 waiting_random = []
@@ -60,21 +61,7 @@ waiting_male = []
 waiting_female = []
 active_pairs = {}
 user_warnings = {}
-pending_media = {}  # token -> {sender, partner, media_type, file_id, ...}
-
-# -------- FLASK app (health endpoint for Render) --------
-flask_app = Flask(__name__)
-
-@flask_app.route("/", methods=["GET"])
-def health():
-    return "OK - GhostTalk bot running", 200
-
-def run_flask():
-    port = int(os.environ.get("PORT", "10000"))
-    try:
-        flask_app.run(host="0.0.0.0", port=port)
-    except Exception as e:
-        logger.error(f"Flask thread failed: {e}")
+pending_media = {}
 
 # -------- DATABASE --------
 def get_conn():
@@ -136,7 +123,7 @@ def db_create_user_if_missing(user):
     ref_code = f"REF{uid}{random.randint(10000,99999)}"
     with get_conn() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO users (user_id, username, first_name, gender, joined_at, referral_code) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO users (user_id, username, first_name, gender, joined_at, referral_code) VALUES (?, ?, ?, ?, ?, ?)",
             (uid, user.username or "", user.first_name or "", None, datetime.utcnow().isoformat(), ref_code)
         )
         conn.commit()
@@ -233,7 +220,7 @@ def warn_user(user_id, reason):
 
         try:
             bot.send_message(user_id, f"🚫 BANNED - {TEMP_BAN_HOURS} hours\n\nReason: {reason}\n\nBan will be lifted automatically.")
-        except Exception:
+        except:
             pass
 
         remove_from_queues(user_id)
@@ -242,7 +229,7 @@ def warn_user(user_id, reason):
     else:
         try:
             bot.send_message(user_id, f"⚠️ WARNING {count}/{WARNING_LIMIT}\n\nReason: {reason}\n\n{WARNING_LIMIT - count} more warnings = BAN!")
-        except Exception:
+        except:
             pass
         return "warn"
 
@@ -260,21 +247,8 @@ def auto_unban():
                         bot.send_message(user_id, "✅ Your ban has been lifted! You can use the bot again.")
                     except:
                         pass
-            except Exception:
+            except:
                 pass
-
-# Optional background thread for auto_unban
-def start_auto_unban_thread():
-    def loop():
-        while True:
-            try:
-                auto_unban()
-            except Exception as e:
-                logger.debug(f"auto_unban error: {e}")
-            time.sleep(AUTO_UNBAN_INTERVAL)
-    t = threading.Thread(target=loop, daemon=True)
-    t.start()
-    logger.info("🔁 auto-unban thread started")
 
 # -------- HELPERS --------
 def remove_from_queues(user_id):
@@ -332,45 +306,37 @@ def report_keyboard():
     )
     return markup
 
-# ---------------------------
-# MEDIA TOKEN GENERATOR
-# ---------------------------
 def generate_media_token(sender_id):
     return f"{sender_id}:{int(time.time()*1000)}:{secrets.token_hex(4)}"
 
-# ✅ KEEP-ALIVE PINGER SYSTEM (safe)
+# -------- KEEP-ALIVE SYSTEM (OPTIMIZED) --------
 def keep_alive_pinger():
     """
-    Sends periodic admin message and optionally hits SELF_URL.
-    NOTE: External uptime monitor (UptimeRobot) is recommended as self-ping may not run when host sleeps.
+    Render free tier ko awake rakhne ka system
+    Har 12 minutes me admin ko ping bhejta hai
     """
+    PING_INTERVAL = 720  # 12 minutes (Render 15 min inactivity limit hai)
+
     def ping_loop():
-        time.sleep(10)
+        time.sleep(90)  # Bot startup ke baad 1.5 min wait
+
         while True:
             try:
-                try:
-                    bot.send_message(ADMIN_ID, f"🤖 Keep-Alive Ping\n⏰ {datetime.utcnow().strftime('%H:%M:%S UTC')}")
-                    logger.info("✅ Self-ping sent to ADMIN")
-                except Exception as e:
-                    logger.debug(f"Could not send admin ping: {e}")
-
-                if SELF_URL:
-                    try:
-                        resp = urllib.request.urlopen(SELF_URL, timeout=10)
-                        status = getattr(resp, "getcode", lambda: "N/A")()
-                        logger.info(f"✅ Self-HTTP ping to SELF_URL succeeded (code {status})")
-                    except Exception as e:
-                        logger.debug(f"Self-HTTP ping failed: {e}")
+                bot.send_message(
+                    ADMIN_ID,
+                    f"🤖 Keep-Alive\n⏰ {datetime.utcnow().strftime('%H:%M UTC')}\n📊 Active: {len(active_pairs)//2} chats"
+                )
+                logger.info("✅ Keep-alive ping sent")
             except Exception as e:
-                logger.error(f"Keep-alive loop error: {e}")
+                logger.error(f"❌ Ping failed: {e}")
 
             time.sleep(PING_INTERVAL)
 
     thread = threading.Thread(target=ping_loop, daemon=True)
     thread.start()
-    logger.info("🔄 Keep-alive pinger started (every %s seconds)", PING_INTERVAL)
+    logger.info("🔄 Keep-alive pinger started")
 
-# -------- COMMANDS & HANDLERS --------
+# -------- COMMANDS --------
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     user = message.from_user
@@ -394,6 +360,7 @@ def cmd_start(message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("sex:"))
 def callback_set_gender(call):
     uid = call.from_user.id
+
     db_create_user_if_missing(call.from_user)
 
     if db_is_banned(uid):
@@ -432,12 +399,10 @@ def cmd_settings(message):
 
     text = f"""⚙️ SETTINGS & STATS
 
-
 👤 Gender: {u['gender'] or 'Not set'}
 💬 Messages Sent: {u['messages_sent']}
 ✅ Media Approved: {u['media_approved']}
 ❌ Media Rejected: {u['media_rejected']}
-
 
 📝 Change Your Gender:"""
 
@@ -461,19 +426,15 @@ def cmd_refer(message):
     ref_link = db_get_referral_link(uid)
     text = f"""🎁 REFERRAL SYSTEM
 
-
 📤 Your Referral Link:
 {ref_link}
 
-
 👥 People Referred: {u['referral_count']}
-
 
 📋 How it works:
 • Share your link with friends
 • They join with your link
 • You both get rewards!
-
 
 ✅ Share and earn!"""
 
@@ -601,20 +562,16 @@ def callback_report(call):
 
     bot.send_message(uid, "✅ Your report has been submitted. Admins will review it soon.")
 
-    # Admin notification
     try:
         admin_msg = f"""⚠️ NEW REPORT
-
 
 Report Type: {report_type_name}
 Reporter: {uid}
 Reported User: {partner_id}
 Timestamp: {datetime.utcnow().isoformat()}
 
-
 To ban this user:
 /ban {partner_id} 24 Reported for {report_type}
-
 
 Or permanent:
 /ban {partner_id} permanent Reported for {report_type}"""
@@ -635,7 +592,6 @@ def cmd_ban(message):
 
         if len(parts) < 2:
             bot.reply_to(message, """Usage: /ban <user_id> [hours|permanent] [reason]
-
 
 Examples:
 /ban 123456789 24 Vulgar messages
@@ -754,7 +710,6 @@ def handler_text(m):
 
     db_create_user_if_missing(m.from_user)
 
-    # Button handlers
     if m.text == "💬 Tips":
         bot.send_message(uid, """💬 CHAT TIPS:
 
@@ -764,8 +719,7 @@ def handler_text(m):
 ✅ No links or spam
 ✅ No personal info sharing
 ✅ Have genuine conversations
-✅ Enjoy the experience!
- /next -  /stop""", reply_markup=chat_keyboard())
+✅ Enjoy the experience!""", reply_markup=chat_keyboard())
         return
 
     if m.text == "📊 Stats":
@@ -795,12 +749,10 @@ def handler_text(m):
         cmd_stop(m)
         return
 
-    # Check banned content
     if is_banned_content(m.text):
         warn_user(uid, "Vulgar words or links")
         return
 
-    # Send to partner
     if uid in active_pairs:
         partner = active_pairs[uid]
         try:
@@ -830,7 +782,6 @@ def handle_media(m):
     partner = active_pairs[uid]
     media_type = m.content_type
 
-    # Get media ID
     if media_type == 'photo':
         media_id = m.photo[-1].file_id
     elif media_type == 'document':
@@ -844,7 +795,6 @@ def handle_media(m):
     else:
         return
 
-    # If sender already allowed earlier -> forward immediately
     u = db_get_user(uid)
     if u and u["media_approved"] and int(u["media_approved"]) > 0:
         try:
@@ -859,7 +809,6 @@ def handle_media(m):
             bot.send_message(uid, "❌ Could not forward media")
         return
 
-    # create unique token and save metadata (consent pending)
     token = generate_media_token(uid)
     pending_media[token] = {
         "sender": uid,
@@ -869,7 +818,6 @@ def handle_media(m):
         "timestamp": datetime.utcnow().isoformat()
     }
 
-    # Send consent request to partner (NO file preview)
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton("✅ Accept", callback_data=f"app:{token}"),
@@ -900,7 +848,6 @@ def approve_media_cb(call):
         media_type = meta["media_type"]
         file_id = meta["file_id"]
 
-        # Deliver the actual media to the partner now
         try:
             if media_type == 'photo':
                 bot.send_photo(partner_id, file_id, caption="📸 Media delivered (accepted).")
@@ -922,20 +869,17 @@ def approve_media_cb(call):
             bot.answer_callback_query(call.id, "❌ Error delivering media", show_alert=True)
             return
 
-        # mark sharing allowed for future
         try:
             db_set_media_sharing(sender_id, True)
             db_increment_media(sender_id, "approved")
         except:
             pass
 
-        # Notify sender
         try:
             bot.send_message(sender_id, f"✅ Your {media_type} was ACCEPTED by partner and delivered.")
         except:
             pass
 
-        # Edit consent message to reflect accepted and remove buttons
         try:
             chat_id = meta.get("consent_chat_id", call.message.chat.id)
             msg_id = meta.get("consent_message_id", call.message.message_id)
@@ -966,14 +910,12 @@ def reject_media_cb(call):
         partner_id = meta["partner"]
         media_type = meta["media_type"]
 
-        # Notify sender about rejection (do NOT mark permanent block)
         try:
             bot.send_message(sender_id, f"❌ Your {media_type} was REJECTED by partner. It was not delivered.")
             db_increment_media(sender_id, "rejected")
         except:
             pass
 
-        # Edit consent message to show rejection and remove buttons
         try:
             chat_id = meta.get("consent_chat_id", call.message.chat.id)
             msg_id = meta.get("consent_message_id", call.message.message_id)
@@ -991,28 +933,34 @@ def reject_media_cb(call):
         logger.error(f"Error in reject_media_cb: {e}")
         bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
 
-# -------- MAIN --------
+# -------- BOT POLLING THREAD --------
+def run_bot_polling():
+    """Separate thread me bot polling chalega"""
+    logger.info("🤖 Starting Telegram bot polling...")
+    try:
+        bot.infinity_polling(timeout=60, long_polling_timeout=60)
+    except Exception as e:
+        logger.error(f"❌ Bot polling error: {e}")
+
+# -------- MAIN EXECUTION --------
 if __name__ == "__main__":
+    # Database initialize karo
     init_db()
+    logger.info("✅ Database initialized")
 
-    # Start Flask health endpoint thread (so Render sees app on PORT)
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info("🔁 Flask health endpoint thread started")
-
-    # start auto-unban background thread
-    start_auto_unban_thread()
-
-    # Start keep-alive pinger
+    # Keep-alive pinger start karo
     keep_alive_pinger()
 
-    logger.info("✅ Bot Started Successfully!")
-    logger.info(f"Admin ID: {ADMIN_ID}")
-    logger.info(f"Bot username: @{BOT_USERNAME}")
+    # Bot polling ko separate thread me chalao
+    bot_thread = threading.Thread(target=run_bot_polling, daemon=True)
+    bot_thread.start()
+    logger.info("✅ Bot polling thread started")
 
-    try:
-        bot.infinity_polling(timeout=60)
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
+    # Flask app ko main thread me chalao (Render PORT bind ke liye)
+    PORT = int(os.getenv("PORT", 10000))
+    logger.info(f"🌐 Starting Flask on port {PORT}")
+    logger.info(f"👤 Admin ID: {ADMIN_ID}")
+    logger.info(f"🤖 Bot username: @{BOT_USERNAME}")
+
+    # Flask app run (Render ko yahi chahiye)
+    app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
