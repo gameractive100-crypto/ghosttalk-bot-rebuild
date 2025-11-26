@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-GhostTalk Premium Bot - ULTIMATE MASTERCLASS EDITION
+GhostTalk Premium Bot - ULTIMATE MASTERCLASS EDITION v2
 Production-ready, error-free, admin monitoring, report after chat end
 Expanded ban words (English), storage-optimized, payment integration ready
+Age validation: 12-99 years, Search matching FIXED
 """
 
 import sqlite3
@@ -24,8 +25,8 @@ API_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not API_TOKEN:
     raise ValueError("BOT_TOKEN environment variable missing!")
 
-BOT_USERNAME = "SayNymBot"  # Update with your bot username
-ADMIN_ID = int(os.getenv("ADMIN_ID", 8361006824))  # Update with your Telegram ID
+BOT_USERNAME = "SayNymBot"
+ADMIN_ID = int(os.getenv("ADMIN_ID", 8361006824))
 OWNER_ID = ADMIN_ID
 DB_PATH = os.getenv("DB_PATH", "ghosttalk_fixed.db")
 
@@ -33,37 +34,6 @@ WARNING_LIMIT = 3
 TEMP_BAN_HOURS = 24
 PREMIUM_REFERRALS_NEEDED = 3
 PREMIUM_DURATION_HOURS = 1
-
-# -------- PAYMENT CONFIG (COMMENTED OUT - ENABLE WHEN BOT GOES VIRAL) --------
-"""
-PREMIUM_PRICES = {
-    "monthly": {"amount": 299, "currency": "INR", "months": 1, "label": "1 Month Premium"},
-    "quarterly": {"amount": 599, "currency": "INR", "months": 3, "label": "3 Months Premium"},
-}
-
-PAYMENT_METHODS = ["Paytm", "Stripe", "PayPal"]
-
-# TODO: Add payment gateway integration here
-# Paytm API: https://business.paytm.com/docs
-# Stripe API: https://stripe.com/docs/api
-# PayPal API: https://developer.paypal.com/
-
-def process_premium_payment(user_id, method, plan):
-    # Integration code here
-    # On success: extend user's premium_until
-    pass
-
-def prompt_premium_purchase(user_id):
-    msg = (
-        "💎 Upgrade to Premium!\n\n"
-        f"1️⃣ 1 Month: ₹{PREMIUM_PRICES['monthly']['amount']}\n"
-        f"2️⃣ 3 Months: ₹{PREMIUM_PRICES['quarterly']['amount']}\n\n"
-        f"💳 Payment methods: {', '.join(PAYMENT_METHODS)}\n"
-        "🌍 International payments accepted (USD, EUR, etc.)\n\n"
-        "📱 Use /premium to purchase"
-    )
-    return msg
-"""
 
 # -------- EXPANDED BANNED WORDS (ENGLISH ONLY) --------
 BANNED_WORDS = [
@@ -324,7 +294,7 @@ def db_get_referral_link(user_id):
     return None
 
 def db_is_premium(user_id):
-    if user_id == ADMIN_ID:  # Admin bypass
+    if user_id == ADMIN_ID:
         return True
     u = db_get_user(user_id)
     if not u or not u["premium_until"]:
@@ -562,7 +532,7 @@ def cmd_start(message):
         )
         bot.send_message(user.id, "👋 Welcome to GhostTalk! Please select your gender to start:", reply_markup=markup)
     elif not u["age"]:
-        bot.send_message(user.id, "Please enter your age (numbers only):")
+        bot.send_message(user.id, "Please enter your age (numbers only, 12-99):")
     elif not u["country"]:
         bot.send_message(user.id, "Please enter your country name:")
     else:
@@ -606,7 +576,7 @@ def callback_set_gender(call):
     try:
         gender_confirm_msg = (
             f"✅ Gender set to {gender_emoji} {gender_display}\n\n"
-            "Now, please enter your age (numbers only):"
+            "Now, please enter your age (numbers only, 12-99):"
         )
         bot.send_message(uid, gender_confirm_msg)
     except:
@@ -908,58 +878,10 @@ def cmd_unban(message):
     except Exception as e:
         bot.reply_to(message, f"Error: {str(e)}")
 
-# -------- PREMIUM PURCHASE (COMMENTED OUT) --------
-"""
-@bot.message_handler(commands=['premium'])
-def cmd_premium(message):
-    uid = message.from_user.id
-
-    if db_is_premium(uid):
-        u = db_get_user(uid)
-        expiry = datetime.fromisoformat(u["premium_until"]).strftime("%Y-%m-%d %H:%M")
-        bot.send_message(uid, f"✅ You already have Premium!\nExpires: {expiry}")
-        return
-
-    msg = prompt_premium_purchase(uid)
-
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        types.InlineKeyboardButton("💳 1 Month - ₹299", callback_data="pay:monthly"),
-        types.InlineKeyboardButton("💎 3 Months - ₹599", callback_data="pay:quarterly")
-    )
-
-    bot.send_message(uid, msg, reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("pay:"))
-def callback_payment(call):
-    uid = call.from_user.id
-    _, plan = call.data.split(":")
-
-    # TODO: Integrate actual payment gateway here
-    # For now, show payment instructions
-
-    plan_info = PREMIUM_PRICES[plan]
-    payment_msg = (
-        "💳 Premium Purchase\n\n"
-        f"Plan: {plan_info['label']}\n"
-        f"Amount: ₹{plan_info['amount']}\n\n"
-        "Payment methods:\n"
-        "1️⃣ Paytm: [Payment link here]\n"
-        "2️⃣ International: [Stripe/PayPal link]\n\n"
-        "After payment, send screenshot to admin for verification."
-    )
-
-    bot.answer_callback_query(call.id, "Payment info sent", show_alert=False)
-    bot.send_message(uid, payment_msg)
-
-    # Notify admin
-    admin_msg = f"💰 Payment request from {uid} for {plan_info['label']}"
-    bot.send_message(ADMIN_ID, admin_msg)
-"""
-
 def match_users():
     global waiting_random, waiting_opposite, active_pairs
 
+    # Match random users (same gender or any)
     while len(waiting_random) >= 2:
         u1 = waiting_random.pop(0)
         u2 = waiting_random.pop(0)
@@ -972,6 +894,7 @@ def match_users():
         bot.send_message(u1, format_partner_found_message(u2_data, u1), reply_markup=chat_keyboard())
         bot.send_message(u2, format_partner_found_message(u1_data, u2), reply_markup=chat_keyboard())
 
+    # Match opposite gender users
     i = 0
     while i < len(waiting_opposite):
         uid, gen = waiting_opposite[i]
@@ -998,6 +921,7 @@ def match_users():
 @bot.message_handler(func=lambda m: m.content_type == "text" and not m.text.startswith("/"))
 def handler_text(m):
     uid = m.from_user.id
+    text = m.text.strip()  # ✅ Clean whitespace
 
     if db_is_banned(uid):
         bot.send_message(uid, "🚫 You are banned")
@@ -1012,9 +936,9 @@ def handler_text(m):
 
     if not u["age"]:
         try:
-            age = int(m.text.strip())
-            if age < 13 or age > 100:
-                bot.send_message(uid, "Please enter a valid age (13-100)")
+            age = int(text)
+            if age < 12 or age > 99:  # ✅ Age validation 12-99
+                bot.send_message(uid, "Please enter a valid age between 12 and 99.")
                 return
             db_set_age(uid, age)
             bot.send_message(uid, f"✅ Age set to {age}\n\nNow, please enter your country name:")
@@ -1024,9 +948,9 @@ def handler_text(m):
             return
 
     if not u["country"]:
-        country_info = get_country_info(m.text)
+        country_info = get_country_info(text)
         if not country_info:
-            bot.send_message(uid, f"'{m.text}' is not a valid country name. Please enter a valid country (e.g., India, United States, Indonesia)")
+            bot.send_message(uid, f"'{text}' is not a valid country name. Please enter a valid country (e.g., India, United States)")
             return
         country_name, country_flag = country_info
         db_set_country(uid, country_name, country_flag)
@@ -1037,7 +961,8 @@ def handler_text(m):
         bot.send_message(uid, country_complete_msg, reply_markup=main_keyboard(uid))
         return
 
-    if m.text == "📊 Stats":
+    # ✅ BUTTON TEXT MATCHING - Check exact text
+    if text == "📊 Stats":
         u = db_get_user(uid)
         if u:
             premium_status = "✅ Premium Active" if db_is_premium(uid) else "🆓 Free User"
@@ -1056,35 +981,53 @@ def handler_text(m):
             bot.send_message(uid, stats_msg, reply_markup=chat_keyboard())
         return
 
-    if m.text == "⚠️ Report":
+    if text == "⚠️ Report":
         cmd_report(m)
         return
 
-    if m.text == "⏭️ Next":
+    if text == "⏭️ Next":
         cmd_next(m)
         return
 
-    if m.text == "🛑 Stop":
+    if text == "🛑 Stop":
         cmd_stop(m)
         return
 
-    if m.text.startswith("🔒"):
+    if text == "🔀 Search Random":
+        cmd_search_random(m)
+        return
+
+    if text == "🔒 Opposite Gender (Premium)":
         premium_locked_msg = (
             "💎 This feature requires Premium!\n\n"
-            f"Invite {PREMIUM_REFERRALS_NEEDED} friends to unlock {PREMIUM_DURATION_HOURS} hour premium.\n"
+            f"Invite 3 friends to unlock 1 hour premium.\n"
             "Use /refer to get your link!"
         )
         bot.send_message(uid, premium_locked_msg)
         return
 
-    if is_banned_content(m.text):
+    if text == "🎯 Search Opposite Gender":
+        cmd_search_opposite(m)
+        return
+
+    if text == "⚙️ Settings":
+        cmd_settings(m)
+        return
+
+    if text == "👥 Refer":
+        cmd_refer(m)
+        return
+
+    # ✅ Check for banned content
+    if is_banned_content(text):
         warn_user(uid, "Vulgar words or links")
         return
 
+    # ✅ Send message to partner
     if uid in active_pairs:
         partner = active_pairs[uid]
         try:
-            bot.send_message(partner, m.text)
+            bot.send_message(partner, text)
             with get_conn() as conn:
                 conn.execute("UPDATE users SET messages_sent=messages_sent+1 WHERE user_id=?", (uid,))
                 conn.commit()
@@ -1282,6 +1225,7 @@ def run_bot_polling():
 if __name__ == "__main__":
     init_db()
     logger.info("Database initialized")
+    logger.info("GhostTalk Premium Bot v2 - Starting with ALL FIXES!")
 
     keep_alive_pinger()
 
@@ -1293,5 +1237,7 @@ if __name__ == "__main__":
     logger.info(f"Starting Flask on port {PORT}")
     logger.info(f"Admin ID: {ADMIN_ID}")
     logger.info(f"Bot username: {BOT_USERNAME}")
+    logger.info(f"Age validation: 12-99 years")
+    logger.info(f"Search matching: FIXED")
 
     app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
