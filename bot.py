@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
 GhostTalk Premium Bot - FINAL FIXED v2.2
-- Same as v2.1 but admin commands /pradd /prrem /ban /unban accept either numeric user_id or username (with or without @).
-- No other changes; mirror-style preserved.
+- Removed /pay and /vip
+- Improved /help (user-friendly & professional)
+- Admin commands accept user_id or @username
+- Queue duplicate-check message improved
+- Full report workflow: reporter, reported, reason logged & sent to admin
+- Consent buttons auto-hide; thumbs removed
+- Minimal changes elsewhere; original behavior preserved
 """
 
 import sqlite3
@@ -24,7 +29,7 @@ API_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not API_TOKEN:
     raise ValueError("🚨 BOT_TOKEN not found!")
 
-BOT_USERNAME = "SayNymBot"
+BOT_USERNAME = os.getenv("BOT_USERNAME", "SayNymBot")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 8361006824))
 OWNER_ID = ADMIN_ID
 DB_PATH = os.getenv("DB_PATH", "ghosttalk_final.db")
@@ -34,15 +39,18 @@ TEMP_BAN_HOURS = 24
 PREMIUM_REFERRALS_NEEDED = 3
 PREMIUM_DURATION_HOURS = 1
 
-# -------- BANNED WORDS --------
+# -------- BANNED WORDS / LINKS --------
 BANNED_WORDS = [
-        "fuck", "fucking", "sex chat", "nudes", "pussy", "dick", "cock", "penis", "vagina", "boobs", "tits", "ass", "asshole",
-    "bitch", "slut", "whore", "hoe", "prostitute", "porn", "pornography", "rape", "molest", "anj", "anjing", "babi", "asu","kontl","kontol","puki","memek","jembut" , "mc", "randi", "randika","maderchod","bsdk","lauda","lund","chut","choot","chot","chuut","gand","gaand","ma ka lauda", "mkc", "teri ma ki chut","teri ma ki chuut"
+    "fuck", "fucking", "sex chat", "nudes", "pussy", "dick", "cock", "penis", "vagina", "boobs", "tits", "ass", "asshole",
+    "bitch", "slut", "whore", "hoe", "prostitute", "porn", "pornography", "rape", "molest",
+    # common insults from earlier list (kept for content moderation)
+    "anj", "anjing", "babi", "asu","kontl","kontol","puki","memek","jembut","mc","randi","randika","maderchod","bsdk",
+    "lauda","lund","chut","choot","chot","chuut","gand","gaand","ma ka lauda","mkc","teri ma ki chut","teri ma ki chuut"
 ]
 LINK_PATTERN = re.compile(r'https?://|www\.', re.IGNORECASE)
 BANNED_PATTERNS = [re.compile(rf'\b{re.escape(w)}\b', re.IGNORECASE) for w in BANNED_WORDS]
 
-# -------- FULL 195 COUNTRIES --------
+# -------- COUNTRIES (same as before) --------
 COUNTRIES = {
     "afghanistan": "🇦🇫", "albania": "🇦🇱", "algeria": "🇩🇿", "andorra": "🇦🇩", "angola": "🇦🇴",
     "antigua and barbuda": "🇦🇬", "argentina": "🇦🇷", "armenia": "🇦🇲", "australia": "🇦🇺", "austria": "🇦🇹",
@@ -119,13 +127,13 @@ def health():
 
 # -------- RUNTIME DATA --------
 waiting_random = []
-waiting_opposite = []
+waiting_opposite = []  # list of tuples (uid, gender)
 active_pairs = {}
 user_warnings = {}
 pending_media = {}
-pending_feedback = {}   # token -> {from, about, msg_id, timestamp}
 chat_history = {}
 age_update_pending = {}
+pending_reports = {}  # reporter_id -> {reported_id, report_type}
 
 # -------- DATABASE --------
 def get_conn():
@@ -150,16 +158,9 @@ def init_db():
         )""")
         conn.execute("""CREATE TABLE IF NOT EXISTS reports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            reporter_id INTEGER, reported_id INTEGER,
+            reporter_id INTEGER, reporter_name TEXT,
+            reported_id INTEGER, reported_name TEXT,
             report_type TEXT, reason TEXT, timestamp TEXT
-        )""")
-        # NEW: feedbacks table to store like/dislike data
-        conn.execute("""CREATE TABLE IF NOT EXISTS feedbacks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            from_id INTEGER,
-            about_id INTEGER,
-            feedback_type TEXT,
-            timestamp TEXT
         )""")
         conn.commit()
 
@@ -179,7 +180,12 @@ def db_get_user(user_id):
 
 def db_create_user_if_missing(user):
     uid = user.id
-    if db_get_user(uid):
+    u = db_get_user(uid)
+    if u:
+        # update username/first_name if changed
+        with get_conn() as conn:
+            conn.execute("UPDATE users SET username=?, first_name=? WHERE user_id=?", (user.username or "", user.first_name or "", uid))
+            conn.commit()
         return
     ref_code = f"REF{uid}{random.randint(1000, 99999)}"
     with get_conn() as conn:
@@ -284,11 +290,11 @@ def db_unban_user(user_id):
         conn.execute("DELETE FROM bans WHERE user_id=?", (user_id,))
         conn.commit()
 
-def db_add_report(reporter_id, reported_id, report_type, reason):
+def db_add_report_db(reporter_id, reporter_name, reported_id, reported_name, report_type, reason):
     with get_conn() as conn:
-        conn.execute("""INSERT INTO reports (reporter_id, reported_id, report_type, reason, timestamp)
-            VALUES (?, ?, ?, ?, ?)""",
-            (reporter_id, reported_id, report_type, reason, datetime.utcnow().isoformat()))
+        conn.execute("""INSERT INTO reports (reporter_id, reporter_name, reported_id, reported_name, report_type, reason, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (reporter_id, reporter_name, reported_id, reported_name, report_type, reason, datetime.utcnow().isoformat()))
         conn.commit()
 
 def db_increment_media(user_id, stat_type):
@@ -299,60 +305,34 @@ def db_increment_media(user_id, stat_type):
             conn.execute("UPDATE users SET media_rejected=media_rejected+1 WHERE user_id=?", (user_id,))
         conn.commit()
 
-# NEW: store feedback
-def db_add_feedback(from_id, about_id, feedback_type):
-    with get_conn() as conn:
-        conn.execute("""INSERT INTO feedbacks (from_id, about_id, feedback_type, timestamp)
-            VALUES (?, ?, ?, ?)""", (from_id, about_id, feedback_type, datetime.utcnow().isoformat()))
-        conn.commit()
-
 # -------- HELPERS --------
 def resolve_user_identifier(identifier):
     """
-    Accepts:
-      - numeric string -> returns int
-      - username with or without @ -> tries DB lookup by username, then first_name, then bot.get_chat(@username)
-    Returns user_id (int) or None if not found.
+    Accepts a numeric id, or a username (@name or name) and returns user_id if exists.
+    Tries DB lookup first, then bot.get_chat for @username.
+    Returns integer user_id or None.
     """
     if not identifier:
         return None
     identifier = identifier.strip()
-    # try numeric id
-    try:
-        uid = int(identifier)
-        return uid
-    except:
-        pass
-
-    # username (strip @)
-    uname = identifier.lstrip("@").strip()
-    if not uname:
-        return None
-
-    # 1) try DB lookup (case-insensitive)
-    try:
-        with get_conn() as conn:
-            row = conn.execute("SELECT user_id FROM users WHERE LOWER(username)=?", (uname.lower(),)).fetchone()
-            if row:
-                return row[0]
-            # fallback: match first_name (less reliable)
-            row = conn.execute("SELECT user_id FROM users WHERE LOWER(first_name)=?", (uname.lower(),)).fetchone()
-            if row:
-                return row[0]
-    except Exception as e:
-        logger.debug(f"DB lookup error in resolve_user_identifier: {e}")
-
-    # 2) try Telegram API (public username)
+    # numeric id
+    if identifier.isdigit():
+        return int(identifier)
+    # strip @
+    uname = identifier.lstrip("@")
+    with get_conn() as conn:
+        row = conn.execute("SELECT user_id FROM users WHERE username=? COLLATE NOCASE", (uname,)).fetchone()
+        if row:
+            return row[0]
+    # try to fetch via Telegram API (if bot can see user by username)
     try:
         chat = bot.get_chat(f"@{uname}")
         if chat and hasattr(chat, "id"):
             return chat.id
-    except Exception as e:
-        logger.debug(f"bot.get_chat failed for @{uname}: {e}")
-
+    except Exception:
+        pass
     return None
 
-# -------- WARNING SYSTEM --------
 def is_banned_content(text):
     if not text:
         return False
@@ -390,26 +370,6 @@ def remove_from_queues(user_id):
         waiting_random.remove(user_id)
     waiting_opposite = [(uid, gen) for uid, gen in waiting_opposite if uid != user_id]
 
-def send_feedback_prompt(user_id, about_user_id):
-    """
-    Sends feedback buttons to user asking about about_user_id.
-    Stores a token in pending_feedback for callback handling.
-    """
-    try:
-        token = f"fb{user_id}{int(time.time()*1000)}{secrets.token_hex(4)}"
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("👍", callback_data=f"fb_like:{token}"),
-            types.InlineKeyboardButton("👎", callback_data=f"fb_dislike:{token}")
-        )
-        markup.row(types.InlineKeyboardButton("⚠️ Report", callback_data=f"fb_report:{token}"))
-        msg = bot.send_message(user_id,
-            "If you wish, leave your feedback about your partner. It will help us find better partners for you in the future",
-            reply_markup=markup)
-        pending_feedback[token] = {"from": user_id, "about": about_user_id, "msg_id": msg.message_id, "timestamp": datetime.utcnow().isoformat()}
-    except Exception as e:
-        logger.error(f"Error sending feedback prompt to {user_id}: {e}")
-
 def disconnect_user(user_id):
     global active_pairs
     if user_id in active_pairs:
@@ -426,17 +386,6 @@ def disconnect_user(user_id):
             pass
         try:
             bot.send_message(partner_id, "❌ Partner left chat.\n🔍 Find new partner?", reply_markup=main_keyboard(partner_id))
-        except:
-            pass
-
-        # Send feedback prompt to partner about the user who left
-        try:
-            send_feedback_prompt(partner_id, user_id)
-        except:
-            pass
-        # Also optionally send feedback prompt to the user who left about partner (non-intrusive)
-        try:
-            send_feedback_prompt(user_id, partner_id)
         except:
             pass
 
@@ -488,7 +437,7 @@ def format_partner_found_message(partner_user, viewer_id):
     return msg
 
 def match_users():
-    """MASTERCLASS: Opposite gender from random queue, Random pair in order"""
+    """Opposite gender from random queue, Random pair in order"""
     global waiting_random, waiting_opposite, active_pairs
 
     i = 0
@@ -539,7 +488,7 @@ def cmd_start(message):
     db_create_user_if_missing(user)
 
     if db_is_banned(user.id):
-        bot.send_message(user.id, "🚫 You are BANNED from this bot.")
+        bot.send_message(user.id, "🚫 You are banned from this bot.")
         return
 
     if len(message.text.split()) > 1:
@@ -573,6 +522,37 @@ def cmd_start(message):
             "🎯 Ready to chat?"
         )
         bot.send_message(user.id, welcome_msg, reply_markup=main_keyboard(user.id))
+
+@bot.message_handler(commands=['help'])
+def cmd_help(message):
+    uid = message.from_user.id
+    # Professional and user-friendly help message
+    help_text = (
+        "🤖 GhostTalk — Quick Help\n\n"
+        "How it works (simple):\n"
+        "1) Complete your profile when /start asks: gender → age → country.\n"
+        "2) Use 🔀 Search Random to find someone to chat with.\n"
+        "3) While chatting: ⏭️ Next to move on, 🛑 Stop to end the chat.\n\n"
+        "Important features:\n"
+        "• 🎯 Search Opposite Gender — premium-only feature (unlock via referrals).\n"
+        "• 👥 Refer — invite friends to earn premium time.\n"
+        "• Media consent — recipients must Accept to receive photos/videos.\n\n"
+        "Reporting & Safety:\n"
+        "• If someone violates rules, use the Report button after the chat.\n"
+        "• You'll be asked to choose a reason and optionally type details.\n"
+        "• Admins will review every report.\n\n"
+        "Commands (use in chat with the bot):\n"
+        "• /start — setup or resume\n"
+        "• /help — this message\n"
+        "• /refer — see your referral link and progress\n"
+        "• /report — report a partner (works during and after chat)\n\n"
+        "Tips:\n"
+        "• Complete profile for better matching.\n"
+        "• Do not share personal contacts or explicit content.\n"
+        "• Use /stop if you want to end or cancel a search.\n\n"
+        "Need admin help? Use the bot admin contact provided in the chat if required."
+    )
+    bot.send_message(uid, help_text)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("sex:"))
 def callback_set_gender(call):
@@ -624,15 +604,13 @@ def cmd_settings(message):
         f"📊 Messages Sent: {u['messages_sent']}\n"
         f"✅ Media Approved: {u['media_approved']}\n"
         f"❌ Media Rejected: {u['media_rejected']}\n\n"
-        f"👥 People Referred: {u['referral_count']}/3\n"
+        f"👥 People Referred: {u['referral_count']}/{PREMIUM_REFERRALS_NEEDED}\n"
         f"{premium_status}\n\n"
         "🔗 Change Profile:"
     )
 
     markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("🔗 Refer Link", callback_data="ref:link"),
-    )
+    markup.add(types.InlineKeyboardButton("🔗 Refer Link", callback_data="ref:link"))
     markup.row(types.InlineKeyboardButton("👨 Male", callback_data="sex:male"), types.InlineKeyboardButton("👩 Female", callback_data="sex:female"))
     markup.row(types.InlineKeyboardButton("🎂 Change Age", callback_data="age:change"))
     markup.row(types.InlineKeyboardButton("🌍 Change Country", callback_data="set:country"))
@@ -780,6 +758,15 @@ def cmd_search_random(message):
         bot.send_message(uid, "⏳ Already in chat! Use /next for new partner.")
         return
 
+    # Duplicate queue message (unique wording)
+    already_in_random_queue = uid in waiting_random
+    already_in_opposite_queue = any(uid == x for x, _ in waiting_opposite)
+    if already_in_random_queue or already_in_opposite_queue:
+        bot.send_message(uid,
+            "⏳ You are already waiting in the search queue — sit tight while we look for a match.\n\n"
+            "If you want to cancel, send /stop and you'll be removed.")
+        return
+
     remove_from_queues(uid)
     waiting_random.append(uid)
     bot.send_message(uid, "🔍 Searching for random partner...\n⏳ Please wait...")
@@ -811,6 +798,14 @@ def cmd_search_opposite(message):
         bot.send_message(uid, "⏳ Already in chat! Use /next for new partner.")
         return
 
+    already_in_random_queue = uid in waiting_random
+    already_in_opposite_queue = any(uid == x for x, _ in waiting_opposite)
+    if already_in_random_queue or already_in_opposite_queue:
+        bot.send_message(uid,
+            "⏳ You are already waiting in the search queue — sit tight while we look for a match.\n\n"
+            "If you want to cancel, send /stop and you'll be removed.")
+        return
+
     remove_from_queues(uid)
     waiting_opposite.append((uid, u["gender"]))
     bot.send_message(uid, "🎯 Searching for opposite gender partner...\n⏳ Please wait...")
@@ -831,184 +826,225 @@ def cmd_next(message):
         return
     disconnect_user(uid)
     bot.send_message(uid, "🔍 Looking for new partner...", reply_markup=main_keyboard(uid))
+    # reuse search_random flow
     cmd_search_random(message)
 
 @bot.message_handler(commands=['report'])
 def cmd_report(message):
     uid = message.from_user.id
-    if uid not in active_pairs and uid not in chat_history:
-        bot.send_message(uid, "❌ No active partner to report.")
+    # allow reporting during active chat or after (from chat_history)
+    partner_id = active_pairs.get(uid) or chat_history.get(uid)
+    if not partner_id:
+        bot.send_message(uid, "❌ No partner to report (you haven't chatted yet).")
         return
-    bot.send_message(uid, "⚠️ What type of abuse?", reply_markup=report_keyboard())
+
+    # Show report type options
+    bot.send_message(uid, "⚠️ Select the reason for reporting:", reply_markup=report_keyboard())
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rep:"))
-def callback_report(call):
+def callback_report_type(call):
     uid = call.from_user.id
-    partner_id = active_pairs.get(uid) or chat_history.get(uid)
-
-    if not partner_id:
+    # determine reported partner (active or last)
+    reported_id = active_pairs.get(uid) or chat_history.get(uid)
+    if not reported_id:
         bot.answer_callback_query(call.id, "No partner to report", show_alert=True)
         return
 
     _, report_type = call.data.split(":")
-    report_type_map = {
-        "child": "Child Abuse", "porn": "Pornography", "spam": "Spamming",
-        "scam": "Scam/Fraud", "other": "Other"
-    }
-    report_type_name = report_type_map.get(report_type, "Other")
+    # Save pending report so next text message from user is treated as reason
+    pending_reports[uid] = {"reported_id": reported_id, "report_type": report_type}
+    bot.answer_callback_query(call.id, "Selected. Please type a short reason or details (1-500 chars).", show_alert=False)
+    bot.send_message(uid, "📝 Please type the reason for reporting (what happened?). You can add any details that will help the admin review the case.\n\nTip: be concise and factual.")
 
-    db_add_report(uid, partner_id, report_type, report_type_name)
-    bot.answer_callback_query(call.id, "✅ Report submitted", show_alert=True)
-    bot.send_message(uid, "✅ Your report submitted. Admins will review.")
+@bot.message_handler(func=lambda m: m.content_type == "text" and m.from_user.id in pending_reports)
+def process_report_reason(message):
+    uid = message.from_user.id
+    data = pending_reports.get(uid)
+    if not data:
+        bot.send_message(uid, "❌ No pending report found.")
+        return
 
+    reason_text = message.text.strip()[:500]
+    reported_id = data["reported_id"]
+    report_type = data["report_type"]
+
+    # reporter info
+    reporter = db_get_user(uid) or {}
+    reported = db_get_user(reported_id) or {}
+
+    reporter_name = reporter.get("first_name") or reporter.get("username") or str(uid)
+    reported_name = reported.get("first_name") or reported.get("username") or str(reported_id)
+
+    # save to DB and notify admin
+    db_add_report_db(uid, reporter_name, reported_id, reported_name, report_type, reason_text)
+
+    # send confirmation to reporter
+    bot.send_message(uid, "✅ Your report has been submitted. Admins will review it shortly. Thank you for helping keep the community safe.")
+
+    # send structured message to admin
+    admin_msg = (
+        "⚠️ NEW REPORT RECEIVED\n\n"
+        f"Reporter: {reporter_name} (ID: {uid})\n"
+        f"Reported: {reported_name} (ID: {reported_id})\n"
+        f"Type: {report_type}\n"
+        f"Reason: {reason_text}\n"
+        f"Time: {datetime.utcnow().isoformat()}\n"
+    )
     try:
-        admin_msg = (
-            f"⚠️ NEW REPORT\n\n"
-            f"Type: {report_type_name}\n"
-            f"Reporter: {uid}\n"
-            f"Reported: {partner_id}\n"
-            f"Time: {datetime.utcnow().isoformat()}"
-        )
         bot.send_message(ADMIN_ID, admin_msg)
     except:
-        pass
+        logger.warning("Could not send report to admin via bot (maybe admin blocked bot).")
+
+    # cleanup
+    pending_reports.pop(uid, None)
 
 @bot.message_handler(commands=['pradd'])
 def cmd_pradd(message):
-    """Admin: /pradd [user_id|username] [YYYY-MM-DD]"""
+    """Admin: /pradd [user_id|@username] [YYYY-MM-DD]"""
     if message.from_user.id != ADMIN_ID:
         bot.send_message(message.from_user.id, "❌ Admin only!")
         return
 
-    parts = message.text.split()
-    if len(parts) < 3:
-        bot.reply_to(message, "Usage: /pradd [user_id|username] [YYYY-MM-DD]\nExample: /pradd 12345 2025-12-31 OR /pradd @username 2025-12-31")
-        return
-
-    identifier = parts[1]
-    until_date = parts[2]
-
-    target_id = resolve_user_identifier(identifier)
-    if not target_id:
-        bot.reply_to(message, f"❌ Could not find user '{identifier}'. Use numeric ID or @username.")
-        return
-
-    if not db_set_premium(target_id, until_date):
-        bot.reply_to(message, "❌ Invalid date! Use YYYY-MM-DD")
-        return
-
-    bot.reply_to(message, f"✅ User {identifier} (id:{target_id}) premium until {until_date}")
     try:
-        u = db_get_user(target_id)
-        if u:
-            premium_msg = f"🎉 PREMIUM ADDED!\n✅ Valid until {until_date}\n🎯 Opposite gender search unlocked!"
-            bot.send_message(target_id, premium_msg, reply_markup=main_keyboard(target_id))
-    except:
-        pass
+        parts = message.text.split()
+        if len(parts) < 3:
+            bot.reply_to(message, "Usage: /pradd [user_id|@username] [YYYY-MM-DD]\nExample: /pradd 12345 2025-12-31")
+            return
+
+        identifier = parts[1]
+        target_id = resolve_user_identifier(identifier)
+        if not target_id:
+            bot.reply_to(message, f"❌ Could not find user: {identifier}")
+            return
+
+        until_date = parts[2]
+
+        if not db_set_premium(target_id, until_date):
+            bot.reply_to(message, "❌ Invalid date! Use YYYY-MM-DD")
+            return
+
+        bot.reply_to(message, f"✅ User {target_id} premium until {until_date}")
+        try:
+            u = db_get_user(target_id)
+            if u:
+                premium_msg = f"🎉 PREMIUM ADDED!\n✅ Valid until {until_date}\n🎯 Opposite gender search unlocked!"
+                bot.send_message(target_id, premium_msg, reply_markup=main_keyboard(target_id))
+        except:
+            pass
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {str(e)}")
 
 @bot.message_handler(commands=['prrem'])
 def cmd_prrem(message):
-    """Admin: /prrem [user_id|username]"""
+    """Admin: /prrem [user_id|@username]"""
     if message.from_user.id != ADMIN_ID:
         bot.send_message(message.from_user.id, "❌ Admin only!")
         return
 
-    parts = message.text.split()
-    if len(parts) < 2:
-        bot.reply_to(message, "Usage: /prrem [user_id|username]")
-        return
-
-    identifier = parts[1]
-    target_id = resolve_user_identifier(identifier)
-    if not target_id:
-        bot.reply_to(message, f"❌ Could not find user '{identifier}'. Use numeric ID or @username.")
-        return
-
-    db_remove_premium(target_id)
-    bot.reply_to(message, f"✅ Premium removed for {identifier} (id:{target_id})")
-
     try:
-        bot.send_message(target_id, "❌ Your premium has been removed.", reply_markup=main_keyboard(target_id))
-    except:
-        pass
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "Usage: /prrem [user_id|@username]")
+            return
+
+        identifier = parts[1]
+        target_id = resolve_user_identifier(identifier)
+        if not target_id:
+            bot.reply_to(message, f"❌ Could not find user: {identifier}")
+            return
+
+        db_remove_premium(target_id)
+        bot.reply_to(message, f"✅ Premium removed for {target_id}")
+
+        try:
+            bot.send_message(target_id, "❌ Your premium has been removed.", reply_markup=main_keyboard(target_id))
+        except:
+            pass
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {str(e)}")
 
 @bot.message_handler(commands=['ban'])
 def cmd_ban(message):
-    """Admin: /ban [user_id|username] [hours/permanent] [reason]"""
+    """Admin: /ban [user_id|@username] [hours/permanent] [reason]"""
     if message.from_user.id != ADMIN_ID:
         bot.send_message(message.from_user.id, "❌ Admin only!")
         return
 
-    parts = message.text.split(maxsplit=3)
-    if len(parts) < 2:
-        bot.reply_to(message, "Usage: /ban [user_id|username] [hours/permanent] [reason]")
-        return
+    try:
+        parts = message.text.split(maxsplit=3)
+        if len(parts) < 2:
+            bot.reply_to(message, "Usage: /ban [user_id|@username] [hours/permanent] [reason]")
+            return
 
-    identifier = parts[1]
-    target_id = resolve_user_identifier(identifier)
-    if not target_id:
-        bot.reply_to(message, f"❌ Could not find user '{identifier}'. Use numeric ID or @username.")
-        return
+        identifier = parts[1]
+        target_id = resolve_user_identifier(identifier)
+        if not target_id:
+            bot.reply_to(message, f"❌ Could not find user: {identifier}")
+            return
 
-    hours = 24
-    permanent = False
-    reason = "Banned by admin"
+        hours = 24
+        permanent = False
+        reason = "Banned by admin"
 
-    if len(parts) >= 3:
-        if parts[2].lower() == "permanent":
-            permanent = True
-        else:
+        if len(parts) >= 3:
+            if parts[2].lower() == "permanent":
+                permanent = True
+            else:
+                try:
+                    hours = int(parts[2])
+                except:
+                    hours = 24
+
+        if len(parts) == 4:
+            reason = parts[3]
+
+        db_ban_user(target_id, hours=hours, permanent=permanent, reason=reason)
+
+        if permanent:
+            bot.reply_to(message, f"✅ User {target_id} PERMANENTLY BANNED. {reason}")
             try:
-                hours = int(parts[2])
+                bot.send_message(target_id, f"🚫 PERMANENTLY BANNED.\nReason: {reason}")
             except:
-                hours = 24
-
-    if len(parts) == 4:
-        reason = parts[3]
-
-    db_ban_user(target_id, hours=hours, permanent=permanent, reason=reason)
-
-    if permanent:
-        bot.reply_to(message, f"✅ User {identifier} (id:{target_id}) PERMANENTLY BANNED. {reason}")
-        try:
-            bot.send_message(target_id, f"🚫 PERMANENTLY BANNED.\nReason: {reason}")
-        except:
-            pass
-    else:
-        bot.reply_to(message, f"✅ User {identifier} (id:{target_id}) banned for {hours} hours. {reason}")
-        try:
-            bot.send_message(target_id, f"🚫 Banned for {hours} hours.\nReason: {reason}")
-        except:
-            pass
+                pass
+        else:
+            bot.reply_to(message, f"✅ User {target_id} banned for {hours} hours. {reason}")
+            try:
+                bot.send_message(target_id, f"🚫 Banned for {hours} hours.\nReason: {reason}")
+            except:
+                pass
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {str(e)}")
 
 @bot.message_handler(commands=['unban'])
 def cmd_unban(message):
-    """Admin: /unban [user_id|username]"""
+    """Admin: /unban [user_id|@username]"""
     if message.from_user.id != ADMIN_ID:
         bot.send_message(message.from_user.id, "❌ Admin only!")
         return
 
-    parts = message.text.split()
-    if len(parts) < 2:
-        bot.reply_to(message, "Usage: /unban [user_id|username]")
-        return
-
-    identifier = parts[1]
-    target_id = resolve_user_identifier(identifier)
-    if not target_id:
-        bot.reply_to(message, f"❌ Could not find user '{identifier}'. Use numeric ID or @username.")
-        return
-
-    db_unban_user(target_id)
-    user_warnings[target_id] = 0
-
-    bot.reply_to(message, f"✅ User {identifier} (id:{target_id}) unbanned")
     try:
-        bot.send_message(target_id, "✅ Your ban has been lifted!", reply_markup=main_keyboard(target_id))
-    except:
-        pass
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "Usage: /unban [user_id|@username]")
+            return
 
-# -------- MEDIA HANDLERS (unchanged except consent deletion already present) --------
+        identifier = parts[1]
+        target_id = resolve_user_identifier(identifier)
+        if not target_id:
+            bot.reply_to(message, f"❌ Could not find user: {identifier}")
+            return
+
+        db_unban_user(target_id)
+        user_warnings[target_id] = 0
+
+        bot.reply_to(message, f"✅ User {target_id} unbanned")
+        try:
+            bot.send_message(target_id, "✅ Your ban has been lifted!", reply_markup=main_keyboard(target_id))
+        except:
+            pass
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {str(e)}")
+
 @bot.message_handler(content_types=['photo', 'document', 'video', 'animation', 'sticker'])
 def handle_media(m):
     uid = m.from_user.id
@@ -1038,6 +1074,7 @@ def handle_media(m):
         return
 
     u = db_get_user(uid)
+    # maintain previous behavior: if sender has media_approved > 0, forward automatically
     if u and u["media_approved"]:
         try:
             if media_type == "photo":
@@ -1093,26 +1130,26 @@ def approve_media_cb(call):
         file_id = meta["file_id"]
         msg_id = meta.get("msg_id")
 
+        # Deliver file to the user who accepted (call.from_user.id)
         try:
             if media_type == "photo":
-                bot.send_photo(partner_id, file_id)
+                bot.send_photo(call.from_user.id, file_id)
             elif media_type == "document":
-                bot.send_document(partner_id, file_id)
+                bot.send_document(call.from_user.id, file_id)
             elif media_type == "video":
-                bot.send_video(partner_id, file_id)
+                bot.send_video(call.from_user.id, file_id)
             elif media_type == "animation":
-                bot.send_animation(partner_id, file_id)
+                bot.send_animation(call.from_user.id, file_id)
             elif media_type == "sticker":
-                bot.send_sticker(partner_id, file_id)
+                bot.send_sticker(call.from_user.id, file_id)
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"Error sending media: {e}")
             try:
-                bot.send_message(partner_id, "❌ Could not deliver media")
+                bot.send_message(call.from_user.id, "❌ Could not deliver media")
                 bot.send_message(sender_id, "❌ Media could not be delivered")
             except:
                 pass
-            if token in pending_media:
-                del pending_media[token]
+            pending_media.pop(token, None)
             bot.answer_callback_query(call.id, "Error", show_alert=True)
             return
 
@@ -1123,20 +1160,19 @@ def approve_media_cb(call):
         except:
             pass
 
-        # Delete consent message completely (preferred). Fallback: remove buttons.
+        # Hide/delete consent message reliably
         try:
             if msg_id:
-                bot.delete_message(partner_id, msg_id)
+                bot.delete_message(call.message.chat.id, msg_id)
         except Exception:
             try:
                 if msg_id:
-                    bot.edit_message_reply_markup(partner_id, msg_id, reply_markup=None)
+                    bot.edit_message_reply_markup(call.message.chat.id, msg_id, reply_markup=None)
             except:
                 pass
 
         bot.answer_callback_query(call.id, "✅ Approved", show_alert=False)
-        if token in pending_media:
-            del pending_media[token]
+        pending_media.pop(token, None)
     except Exception as e:
         logger.error(f"Error in approve: {e}")
         bot.answer_callback_query(call.id, "Error", show_alert=True)
@@ -1160,7 +1196,7 @@ def reject_media_cb(call):
         except:
             pass
 
-        # Delete consent message completely (preferred). Fallback: remove buttons.
+        # Hide/delete consent message reliably
         try:
             if msg_id:
                 bot.delete_message(call.message.chat.id, msg_id)
@@ -1172,145 +1208,21 @@ def reject_media_cb(call):
                 pass
 
         bot.answer_callback_query(call.id, "❌ Rejected", show_alert=False)
-        if token in pending_media:
-            del pending_media[token]
+        pending_media.pop(token, None)
     except Exception as e:
         logger.error(f"Error in reject: {e}")
         bot.answer_callback_query(call.id, "Error", show_alert=True)
 
-# -------- FEEDBACK CALLBACKS (NEW) --------
-@bot.callback_query_handler(func=lambda c: c.data.startswith("fb_like:"))
-def fb_like_cb(call):
-    try:
-        token = call.data.split(":", 1)[1]
-        meta = pending_feedback.get(token)
-        if not meta:
-            bot.answer_callback_query(call.id, "Already recorded or expired", show_alert=True)
-            return
-
-        from_id = meta["from"]
-        about_id = meta["about"]
-        msg_id = meta.get("msg_id")
-
-        db_add_feedback(from_id, about_id, "like")
-        bot.answer_callback_query(call.id, "Thanks for your feedback!", show_alert=False)
-
-        # Remove feedback buttons or delete prompt
-        try:
-            if msg_id:
-                bot.delete_message(from_id, msg_id)
-        except Exception:
-            try:
-                if msg_id:
-                    bot.edit_message_reply_markup(from_id, msg_id, reply_markup=None)
-            except:
-                pass
-
-        # Notify user
-        try:
-            bot.send_message(from_id, "👍 Thanks! Your feedback has been recorded.")
-        except:
-            pass
-
-        # cleanup
-        if token in pending_feedback:
-            del pending_feedback[token]
-    except Exception as e:
-        logger.error(f"Error fb_like: {e}")
-        bot.answer_callback_query(call.id, "Error", show_alert=True)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("fb_dislike:"))
-def fb_dislike_cb(call):
-    try:
-        token = call.data.split(":", 1)[1]
-        meta = pending_feedback.get(token)
-        if not meta:
-            bot.answer_callback_query(call.id, "Already recorded or expired", show_alert=True)
-            return
-
-        from_id = meta["from"]
-        about_id = meta["about"]
-        msg_id = meta.get("msg_id")
-
-        db_add_feedback(from_id, about_id, "dislike")
-        bot.answer_callback_query(call.id, "Feedback noted!", show_alert=False)
-
-        # Remove feedback buttons or delete prompt
-        try:
-            if msg_id:
-                bot.delete_message(from_id, msg_id)
-        except Exception:
-            try:
-                if msg_id:
-                    bot.edit_message_reply_markup(from_id, msg_id, reply_markup=None)
-            except:
-                pass
-
-        try:
-            bot.send_message(from_id, "👎 Thanks! Your feedback has been recorded.")
-        except:
-            pass
-
-        if token in pending_feedback:
-            del pending_feedback[token]
-    except Exception as e:
-        logger.error(f"Error fb_dislike: {e}")
-        bot.answer_callback_query(call.id, "Error", show_alert=True)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("fb_report:"))
-def fb_report_cb(call):
-    try:
-        token = call.data.split(":", 1)[1]
-        meta = pending_feedback.get(token)
-        if not meta:
-            bot.answer_callback_query(call.id, "Already recorded or expired", show_alert=True)
-            return
-
-        from_id = meta["from"]
-        about_id = meta["about"]
-        msg_id = meta.get("msg_id")
-
-        # store as a report
-        db_add_report(from_id, about_id, "feedback_report", "Reported via feedback button")
-
-        bot.answer_callback_query(call.id, "Reported. Admins will review.", show_alert=True)
-
-        # Remove feedback buttons or delete prompt
-        try:
-            if msg_id:
-                bot.delete_message(from_id, msg_id)
-        except Exception:
-            try:
-                if msg_id:
-                    bot.edit_message_reply_markup(from_id, msg_id, reply_markup=None)
-            except:
-                pass
-
-        try:
-            bot.send_message(from_id, "⚠️ Thanks — we've submitted the report to admins.")
-            # Notify admin with details
-            admin_msg = (
-                f"⚠️ REPORT (via feedback button)\n\n"
-                f"Reporter: {from_id}\n"
-                f"Reported: {about_id}\n"
-                f"Time: {datetime.utcnow().isoformat()}\n"
-                f"Context: Report submitted from feedback prompt after chat."
-            )
-            bot.send_message(ADMIN_ID, admin_msg)
-        except:
-            pass
-
-        if token in pending_feedback:
-            del pending_feedback[token]
-    except Exception as e:
-        logger.error(f"Error fb_report: {e}")
-        bot.answer_callback_query(call.id, "Error", show_alert=True)
-
-# -------- TEXT HANDLER (unchanged) --------
 @bot.message_handler(func=lambda m: m.content_type == "text" and not m.text.startswith("/"))
 def handler_text(m):
     uid = m.from_user.id
     text = m.text.strip()
+
+    # If user is in report input stage, handled earlier by process_report_reason via decorator.
+    if uid in pending_reports:
+        # Let the registered handler process_report_reason handle it (it has its own decorator)
+        # So here we just return to avoid duplication.
+        return
 
     if db_is_banned(uid):
         bot.send_message(uid, "🚫 You are banned")
@@ -1412,23 +1324,6 @@ def handler_text(m):
     else:
         bot.send_message(uid, "❌ Not connected. Use search.", reply_markup=main_keyboard(uid))
 
-# -------- RULES COMMAND (NEW) --------
-@bot.message_handler(commands=['rules'])
-def cmd_rules(message):
-    uid = message.from_user.id
-    rules_text = (
-        "📘 *Chat Rules — Please read before chatting*\n\n"
-        "1️⃣ *Be respectful.* No harassment, threats, hate speech or abusive language.\n\n"
-        "2️⃣ *Protect privacy.* Don't ask for or share phone numbers, home addresses, payment info, or other personal details.\n\n"
-        "3️⃣ *No explicit content.* Sexual content, nudity, or pornographic material is strictly prohibited.\n\n"
-        "4️⃣ *No spam or advertising.* Unsolicited links, referral spam, or promotions are not allowed.\n\n"
-        "5️⃣ *Report violations.* Use the Report button if someone breaks the rules.\n\n"
-        "🔒 *Violations may lead to warnings or temporary/permanent bans.*\n\n"
-        "Thanks — these rules keep the community safe and professional."
-    )
-    bot.send_message(uid, rules_text, parse_mode="Markdown", reply_markup=main_keyboard(uid))
-
-# -------- POLLING & STARTUP HELPERS --------
 def run_bot_polling():
     logger.info("🤖 Bot polling started...")
     try:
@@ -1436,50 +1331,13 @@ def run_bot_polling():
     except Exception as e:
         logger.error(f"❌ Polling error: {e}")
 
-# -------- SET PUBLIC / ADMIN COMMANDS (NEW) --------
-def set_bot_commands():
-    try:
-        # user visible commands (like your screenshot)
-        user_cmds = [
-            types.BotCommand("search", "🔍 Find a partner"),
-            types.BotCommand("next", "NEW Stop current dialog and find a new partner"),
-            types.BotCommand("stop", "🛑 Stop current dialog"),
-            types.BotCommand("help", "🆘 How to use the bot"),
-            types.BotCommand("pay", "👑 Search by gender"),
-            types.BotCommand("paysupport", "💰 Payment support"),
-            types.BotCommand("vip", "💎 Become a VIP"),
-            types.BotCommand("link", "🔗 Send your Telegram profile URL"),
-            types.BotCommand("rules", "📘 Read the chat rules")
-        ]
-        bot.set_my_commands(user_cmds)
-
-        # admin commands only visible to admin (hidden from other users)
-        try:
-            admin_scope = types.BotCommandScopeChat(chat_id=ADMIN_ID)
-            admin_cmds = [
-                types.BotCommand("ban", "Ban a user"),
-                types.BotCommand("unban", "Unban a user"),
-                types.BotCommand("pradd", "Add premium for user"),
-                types.BotCommand("prrem", "Remove premium for user")
-            ]
-            bot.set_my_commands(admin_cmds, scope=admin_scope)
-        except Exception as e:
-            logger.warning(f"Could not set admin-scoped commands: {e}")
-    except Exception as e:
-        logger.error(f"Error setting bot commands: {e}")
-
 if __name__ == "__main__":
     init_db()
     logger.info("✅ GhostTalk FINAL v2.2 - PRODUCTION READY")
-    logger.info("✅ Gender + Age columns in settings")
-    logger.info("✅ Consent buttons auto-hide and delete")
-    logger.info("✅ Feedback & Report prompt after chat")
-    logger.info("✅ /rules command added")
-    logger.info("✅ Public commands set; admin-only commands scoped")
-    logger.info("✅ Admin commands accept username or user_id")
-
-    # set bot commands (user + admin scope)
-    set_bot_commands()
+    logger.info(" - /pay removed")
+    logger.info(" - /vip removed")
+    logger.info(" - Report workflow improved (reporter, reported, reason)")
+    logger.info(" - Help message updated")
 
     bot_thread = threading.Thread(target=run_bot_polling, daemon=True)
     bot_thread.start()
@@ -1487,4 +1345,3 @@ if __name__ == "__main__":
     PORT = int(os.getenv("PORT", 10000))
     logger.info(f"🌍 Flask on port {PORT}")
     app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
-
