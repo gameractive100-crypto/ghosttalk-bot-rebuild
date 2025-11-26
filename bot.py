@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-GhostTalk Complete - RENDER DEPLOYMENT VERSION
-Flask + Telegram Polling + Keep-Alive System
+GhostTalk Premium Bot - ULTIMATE MASTERCLASS EDITION
+Production-ready, error-free, admin monitoring, report after chat end
+Expanded ban words (English), storage-optimized, payment integration ready
 """
 
 import sqlite3
@@ -9,7 +10,8 @@ import random
 import logging
 import re
 from datetime import datetime, timedelta
-import time, secrets
+import time
+import secrets
 import threading
 import os
 
@@ -20,112 +22,208 @@ from flask import Flask
 # -------- CONFIG --------
 API_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not API_TOKEN:
-    raise ValueError("❌ BOT_TOKEN environment variable missing!")
+    raise ValueError("BOT_TOKEN environment variable missing!")
 
-BOT_USERNAME = "SayNymBot"
-ADMIN_ID = int(os.getenv("ADMIN_ID", "8361006824"))
+BOT_USERNAME = "SayNymBot"  # Update with your bot username
+ADMIN_ID = int(os.getenv("ADMIN_ID", 8361006824))  # Update with your Telegram ID
 OWNER_ID = ADMIN_ID
 DB_PATH = os.getenv("DB_PATH", "ghosttalk_fixed.db")
 
 WARNING_LIMIT = 3
 TEMP_BAN_HOURS = 24
+PREMIUM_REFERRALS_NEEDED = 3
+PREMIUM_DURATION_HOURS = 1
 
-# -------- BANNED WORDS --------
+# -------- PAYMENT CONFIG (COMMENTED OUT - ENABLE WHEN BOT GOES VIRAL) --------
+"""
+PREMIUM_PRICES = {
+    "monthly": {"amount": 299, "currency": "INR", "months": 1, "label": "1 Month Premium"},
+    "quarterly": {"amount": 599, "currency": "INR", "months": 3, "label": "3 Months Premium"},
+}
+
+PAYMENT_METHODS = ["Paytm", "Stripe", "PayPal"]
+
+# TODO: Add payment gateway integration here
+# Paytm API: https://business.paytm.com/docs
+# Stripe API: https://stripe.com/docs/api
+# PayPal API: https://developer.paypal.com/
+
+def process_premium_payment(user_id, method, plan):
+    # Integration code here
+    # On success: extend user's premium_until
+    pass
+
+def prompt_premium_purchase(user_id):
+    msg = (
+        "💎 Upgrade to Premium!\n\n"
+        f"1️⃣ 1 Month: ₹{PREMIUM_PRICES['monthly']['amount']}\n"
+        f"2️⃣ 3 Months: ₹{PREMIUM_PRICES['quarterly']['amount']}\n\n"
+        f"💳 Payment methods: {', '.join(PAYMENT_METHODS)}\n"
+        "🌍 International payments accepted (USD, EUR, etc.)\n\n"
+        "📱 Use /premium to purchase"
+    )
+    return msg
+"""
+
+# -------- EXPANDED BANNED WORDS (ENGLISH ONLY) --------
 BANNED_WORDS = [
-    "fuck you", "sex chat", "pussy", "dick", "vagina", "penis",
-    "chut", "lund", "bhosdi", "madarchod", "bc", "mc",
+    "fuck", "fuck you", "fucking", "fucked", "fucker", "motherfucker",
+    "sex chat", "sex talk", "sexting", "nudes", "nude pics", "send nudes",
+    "pussy", "dick", "cock", "penis", "vagina", "boobs", "tits", "ass", "asshole",
+    "bitch", "slut", "whore", "hoe", "prostitute",
+    "porn", "pornography", "rape", "molest", "pedophile", "child abuse",
+    "scam", "fraud", "fake", "shit", "damn", "bastard", "cunt", "piss", "prick"
 ]
 
-LINK_PATTERN = re.compile(r'(http[s]?://|www\.)\S+', re.IGNORECASE)
+LINK_PATTERN = re.compile(r'https?://|www\.', re.IGNORECASE)
 BANNED_PATTERNS = [re.compile(rf'\b{re.escape(w)}\b', re.IGNORECASE) for w in BANNED_WORDS]
+
+# -------- 195 COUNTRIES WITH FLAGS --------
+COUNTRIES = {
+    "afghanistan": "🇦🇫", "albania": "🇦🇱", "algeria": "🇩🇿", "andorra": "🇦🇩", "angola": "🇦🇴",
+    "antigua and barbuda": "🇦🇬", "argentina": "🇦🇷", "armenia": "🇦🇲", "australia": "🇦🇺", "austria": "🇦🇹",
+    "azerbaijan": "🇦🇿", "bahamas": "🇧🇸", "bahrain": "🇧🇭", "bangladesh": "🇧🇩", "barbados": "🇧🇧",
+    "belarus": "🇧🇾", "belgium": "🇧🇪", "belize": "🇧🇿", "benin": "🇧🇯", "bhutan": "🇧🇹",
+    "bolivia": "🇧🇴", "bosnia and herzegovina": "🇧🇦", "botswana": "🇧🇼", "brazil": "🇧🇷", "brunei": "🇧🇳",
+    "bulgaria": "🇧🇬", "burkina faso": "🇧🇫", "burundi": "🇧🇮", "cabo verde": "🇨🇻", "cambodia": "🇰🇭",
+    "cameroon": "🇨🇲", "canada": "🇨🇦", "central african republic": "🇨🇫", "chad": "🇹🇩", "chile": "🇨🇱",
+    "china": "🇨🇳", "colombia": "🇨🇴", "comoros": "🇰🇲", "congo": "🇨🇬", "costa rica": "🇨🇷",
+    "croatia": "🇭🇷", "cuba": "🇨🇺", "cyprus": "🇨🇾", "czech republic": "🇨🇿", "denmark": "🇩🇰",
+    "djibouti": "🇩🇯", "dominica": "🇩🇲", "dominican republic": "🇩🇴", "ecuador": "🇪🇨", "egypt": "🇪🇬",
+    "el salvador": "🇸🇻", "equatorial guinea": "🇬🇶", "eritrea": "🇪🇷", "estonia": "🇪🇪", "eswatini": "🇸🇿",
+    "ethiopia": "🇪🇹", "fiji": "🇫🇯", "finland": "🇫🇮", "france": "🇫🇷", "gabon": "🇬🇦",
+    "gambia": "🇬🇲", "georgia": "🇬🇪", "germany": "🇩🇪", "ghana": "🇬🇭", "greece": "🇬🇷",
+    "grenada": "🇬🇩", "guatemala": "🇬🇹", "guinea": "🇬🇳", "guinea-bissau": "🇬🇼", "guyana": "🇬🇾",
+    "haiti": "🇭🇹", "honduras": "🇭🇳", "hungary": "🇭🇺", "iceland": "🇮🇸", "india": "🇮🇳",
+    "indonesia": "🇮🇩", "iran": "🇮🇷", "iraq": "🇮🇶", "ireland": "🇮🇪", "israel": "🇮🇱",
+    "italy": "🇮🇹", "jamaica": "🇯🇲", "japan": "🇯🇵", "jordan": "🇯🇴", "kazakhstan": "🇰🇿",
+    "kenya": "🇰🇪", "kiribati": "🇰🇮", "korea north": "🇰🇵", "korea south": "🇰🇷", "kuwait": "🇰🇼",
+    "kyrgyzstan": "🇰🇬", "laos": "🇱🇦", "latvia": "🇱🇻", "lebanon": "🇱🇧", "lesotho": "🇱🇸",
+    "liberia": "🇱🇷", "libya": "🇱🇾", "liechtenstein": "🇱🇮", "lithuania": "🇱🇹", "luxembourg": "🇱🇺",
+    "madagascar": "🇲🇬", "malawi": "🇲🇼", "malaysia": "🇲🇾", "maldives": "🇲🇻", "mali": "🇲🇱",
+    "malta": "🇲🇹", "marshall islands": "🇲🇭", "mauritania": "🇲🇷", "mauritius": "🇲🇺", "mexico": "🇲🇽",
+    "micronesia": "🇫🇲", "moldova": "🇲🇩", "monaco": "🇲🇨", "mongolia": "🇲🇳", "montenegro": "🇲🇪",
+    "morocco": "🇲🇦", "mozambique": "🇲🇿", "myanmar": "🇲🇲", "namibia": "🇳🇦", "nauru": "🇳🇷",
+    "nepal": "🇳🇵", "netherlands": "🇳🇱", "new zealand": "🇳🇿", "nicaragua": "🇳🇮", "niger": "🇳🇪",
+    "nigeria": "🇳🇬", "north macedonia": "🇲🇰", "norway": "🇳🇴", "oman": "🇴🇲", "pakistan": "🇵🇰",
+    "palau": "🇵🇼", "palestine": "🇵🇸", "panama": "🇵🇦", "papua new guinea": "🇵🇬", "paraguay": "🇵🇾",
+    "peru": "🇵🇪", "philippines": "🇵🇭", "poland": "🇵🇱", "portugal": "🇵🇹", "qatar": "🇶🇦",
+    "romania": "🇷🇴", "russia": "🇷🇺", "rwanda": "🇷🇼", "saint kitts and nevis": "🇰🇳", "saint lucia": "🇱🇨",
+    "saint vincent and the grenadines": "🇻🇨", "samoa": "🇼🇸", "san marino": "🇸🇲", "sao tome and principe": "🇸🇹", "saudi arabia": "🇸🇦",
+    "senegal": "🇸🇳", "serbia": "🇷🇸", "seychelles": "🇸🇨", "sierra leone": "🇸🇱", "singapore": "🇸🇬",
+    "slovakia": "🇸🇰", "slovenia": "🇸🇮", "solomon islands": "🇸🇧", "somalia": "🇸🇴", "south africa": "🇿🇦",
+    "south sudan": "🇸🇸", "spain": "🇪🇸", "sri lanka": "🇱🇰", "sudan": "🇸🇩", "suriname": "🇸🇷",
+    "sweden": "🇸🇪", "switzerland": "🇨🇭", "syria": "🇸🇾", "taiwan": "🇹🇼", "tajikistan": "🇹🇯",
+    "tanzania": "🇹🇿", "thailand": "🇹🇭", "timor-leste": "🇹🇱", "togo": "🇹🇬", "tonga": "🇹🇴",
+    "trinidad and tobago": "🇹🇹", "tunisia": "🇹🇳", "turkey": "🇹🇷", "turkmenistan": "🇹🇲", "tuvalu": "🇹🇻",
+    "uganda": "🇺🇬", "ukraine": "🇺🇦", "united arab emirates": "🇦🇪", "united kingdom": "🇬🇧", "united states": "🇺🇸",
+    "uruguay": "🇺🇾", "uzbekistan": "🇺🇿", "vanuatu": "🇻🇺", "vatican city": "🇻🇦", "venezuela": "🇻🇪",
+    "vietnam": "🇻🇳", "yemen": "🇾🇪", "zambia": "🇿🇲", "zimbabwe": "🇿🇼"
+}
+
+COUNTRY_ALIASES = {
+    "usa": "united states", "us": "united states", "america": "united states",
+    "uk": "united kingdom", "britain": "united kingdom",
+    "uae": "united arab emirates",
+    "south korea": "korea south", "north korea": "korea north",
+    "czechia": "czech republic"
+}
+
+def get_country_info(user_input):
+    normalized = user_input.strip().lower()
+    if normalized in COUNTRY_ALIASES:
+        normalized = COUNTRY_ALIASES[normalized]
+    if normalized in COUNTRIES:
+        return normalized.title(), COUNTRIES[normalized]
+    return None
 
 # -------- LOGGING --------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# -------- FLASK APP (RENDER PORT BINDING) --------
+# -------- FLASK APP --------
 app = Flask(__name__)
 bot = telebot.TeleBot(API_TOKEN)
 
-@app.route('/')
+@app.route("/")
 def home():
-    return "✅ GhostTalk Bot is Running!", 200
+    return "GhostTalk Bot is Running!", 200
 
-@app.route('/health')
+@app.route("/health")
 def health():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}, 200
 
 # -------- RUNTIME DATA --------
 waiting_random = []
-waiting_male = []
-waiting_female = []
+waiting_opposite = []
 active_pairs = {}
 user_warnings = {}
 pending_media = {}
+chat_history = {}
 
 # -------- DATABASE --------
 def get_conn():
     conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 def init_db():
     with get_conn() as conn:
-        conn.execute('''CREATE TABLE IF NOT EXISTS users (
+        conn.execute("""CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
             first_name TEXT,
             gender TEXT,
+            age INTEGER,
+            country TEXT,
+            country_flag TEXT,
             messages_sent INTEGER DEFAULT 0,
             media_approved INTEGER DEFAULT 0,
             media_rejected INTEGER DEFAULT 0,
             referral_code TEXT UNIQUE,
             referral_count INTEGER DEFAULT 0,
+            premium_until TEXT,
             joined_at TEXT
-        )''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS bans (
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS bans (
             user_id INTEGER PRIMARY KEY,
             ban_until TEXT,
             permanent INTEGER DEFAULT 0,
             reason TEXT
-        )''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS reports (
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS reports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             reporter_id INTEGER,
             reported_id INTEGER,
             report_type TEXT,
             reason TEXT,
             timestamp TEXT
-        )''')
+        )""")
         conn.commit()
 
 def db_get_user(user_id):
     with get_conn() as conn:
-        row = conn.execute("SELECT user_id, username, first_name, gender, messages_sent, media_approved, media_rejected, referral_code, referral_count FROM users WHERE user_id=?", (user_id,)).fetchone()
+        row = conn.execute("""SELECT user_id, username, first_name, gender, age, country, country_flag,
+                              messages_sent, media_approved, media_rejected, referral_code, referral_count, premium_until
+                              FROM users WHERE user_id=?""", (user_id,)).fetchone()
         if not row:
             return None
         return {
-            "user_id": row[0],
-            "username": row[1],
-            "first_name": row[2],
-            "gender": row[3],
-            "messages_sent": row[4],
-            "media_approved": row[5],
-            "media_rejected": row[6],
-            "referral_code": row[7],
-            "referral_count": row[8]
+            "user_id": row[0], "username": row[1], "first_name": row[2],
+            "gender": row[3], "age": row[4], "country": row[5], "country_flag": row[6],
+            "messages_sent": row[7], "media_approved": row[8], "media_rejected": row[9],
+            "referral_code": row[10], "referral_count": row[11], "premium_until": row[12]
         }
 
 def db_create_user_if_missing(user):
     uid = user.id
     if db_get_user(uid):
         return
-    ref_code = f"REF{uid}{random.randint(10000,99999)}"
+    ref_code = f"REF{uid}{random.randint(1000,99999)}"
     with get_conn() as conn:
-        conn.execute(
-            "INSERT INTO users (user_id, username, first_name, gender, joined_at, referral_code) VALUES (?, ?, ?, ?, ?, ?)",
-            (uid, user.username or "", user.first_name or "", None, datetime.utcnow().isoformat(), ref_code)
-        )
+        conn.execute("""INSERT INTO users (user_id, username, first_name, gender, age, country, country_flag, joined_at, referral_code)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     (uid, user.username or "", user.first_name or "", None, None, None, None, datetime.utcnow().isoformat(), ref_code))
         conn.commit()
 
 def db_set_gender(user_id, gender):
@@ -133,12 +231,30 @@ def db_set_gender(user_id, gender):
         conn.execute("UPDATE users SET gender=? WHERE user_id=?", (gender, user_id))
         conn.commit()
 
+def db_set_age(user_id, age):
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET age=? WHERE user_id=?", (age, user_id))
+        conn.commit()
+
+def db_set_country(user_id, country, flag):
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET country=?, country_flag=? WHERE user_id=?", (country, flag, user_id))
+        conn.commit()
+
 def db_set_media_sharing(user_id, allow: bool):
     with get_conn() as conn:
         if allow:
-            conn.execute("UPDATE users SET media_approved = 1, media_rejected = 0 WHERE user_id=?", (user_id,))
+            conn.execute("UPDATE users SET media_approved=1, media_rejected=0 WHERE user_id=?", (user_id,))
         else:
-            conn.execute("UPDATE users SET media_approved = 0, media_rejected = 1 WHERE user_id=?", (user_id,))
+            conn.execute("UPDATE users SET media_approved=0, media_rejected=1 WHERE user_id=?", (user_id,))
+        conn.commit()
+
+def db_increment_media(user_id, stat_type):
+    with get_conn() as conn:
+        if stat_type == "approved":
+            conn.execute("UPDATE users SET media_approved=media_approved+1 WHERE user_id=?", (user_id,))
+        elif stat_type == "rejected":
+            conn.execute("UPDATE users SET media_rejected=media_rejected+1 WHERE user_id=?", (user_id,))
         conn.commit()
 
 def db_is_banned(user_id):
@@ -161,10 +277,12 @@ def db_is_banned(user_id):
 def db_ban_user(user_id, hours=None, permanent=False, reason=""):
     with get_conn() as conn:
         if permanent:
-            conn.execute("INSERT OR REPLACE INTO bans (user_id, ban_until, permanent, reason) VALUES (?, ?, ?, ?)", (user_id, None, 1, reason))
+            conn.execute("INSERT OR REPLACE INTO bans (user_id, ban_until, permanent, reason) VALUES (?, ?, ?, ?)",
+                         (user_id, None, 1, reason))
         else:
             until = (datetime.utcnow() + timedelta(hours=hours)).isoformat() if hours else None
-            conn.execute("INSERT OR REPLACE INTO bans (user_id, ban_until, permanent, reason) VALUES (?, ?, ?, ?)", (user_id, until, 0, reason))
+            conn.execute("INSERT OR REPLACE INTO bans (user_id, ban_until, permanent, reason) VALUES (?, ?, ?, ?)",
+                         (user_id, until, 0, reason))
         conn.commit()
 
 def db_unban_user(user_id):
@@ -174,30 +292,98 @@ def db_unban_user(user_id):
 
 def db_add_report(reporter_id, reported_id, report_type, reason):
     with get_conn() as conn:
-        conn.execute(
-            "INSERT INTO reports (reporter_id, reported_id, report_type, reason, timestamp) VALUES (?, ?, ?, ?, ?)",
-            (reporter_id, reported_id, report_type, reason, datetime.utcnow().isoformat())
-        )
-        conn.commit()
-
-def db_increment_media(user_id, stat_type):
-    with get_conn() as conn:
-        if stat_type == "approved":
-            conn.execute("UPDATE users SET media_approved = media_approved + 1 WHERE user_id=?", (user_id,))
-        elif stat_type == "rejected":
-            conn.execute("UPDATE users SET media_rejected = media_rejected + 1 WHERE user_id=?", (user_id,))
+        conn.execute("""INSERT INTO reports (reporter_id, reported_id, report_type, reason, timestamp)
+                        VALUES (?, ?, ?, ?, ?)""",
+                     (reporter_id, reported_id, report_type, reason, datetime.utcnow().isoformat()))
         conn.commit()
 
 def db_add_referral(user_id):
     with get_conn() as conn:
-        conn.execute("UPDATE users SET referral_count = referral_count + 1 WHERE user_id=?", (user_id,))
+        conn.execute("UPDATE users SET referral_count=referral_count+1 WHERE user_id=?", (user_id,))
         conn.commit()
+        u = db_get_user(user_id)
+        if u and u["referral_count"] >= PREMIUM_REFERRALS_NEEDED:
+            premium_until = (datetime.utcnow() + timedelta(hours=PREMIUM_DURATION_HOURS)).isoformat()
+            conn.execute("UPDATE users SET premium_until=?, referral_count=0 WHERE user_id=?", (premium_until, user_id))
+            conn.commit()
+            try:
+                premium_msg = (
+                    "🎉 PREMIUM UNLOCKED!\n"
+                    f"You've earned {PREMIUM_DURATION_HOURS} hour of premium access!\n"
+                    "You can now search opposite gender!\n"
+                    f"Expires in {PREMIUM_DURATION_HOURS} hour"
+                )
+                bot.send_message(user_id, premium_msg)
+            except:
+                pass
 
 def db_get_referral_link(user_id):
     user = db_get_user(user_id)
     if user:
         return f"https://t.me/{BOT_USERNAME}?start={user['referral_code']}"
     return None
+
+def db_is_premium(user_id):
+    if user_id == ADMIN_ID:  # Admin bypass
+        return True
+    u = db_get_user(user_id)
+    if not u or not u["premium_until"]:
+        return False
+    try:
+        return datetime.fromisoformat(u["premium_until"]) > datetime.utcnow()
+    except:
+        return False
+
+# -------- CLEANUP FUNCTIONS --------
+def cleanup_old_reports():
+    try:
+        with get_conn() as conn:
+            result = conn.execute("DELETE FROM reports WHERE timestamp < datetime('now', '-30 days')")
+            conn.commit()
+            deleted = result.rowcount
+            if deleted > 0:
+                logger.info(f"Cleaned {deleted} old reports")
+    except Exception as e:
+        logger.error(f"Error cleaning reports: {e}")
+
+def cleanup_pending_media():
+    try:
+        now = datetime.utcnow()
+        tokens_to_remove = []
+        for token, meta in list(pending_media.items()):
+            try:
+                timestamp = datetime.fromisoformat(meta["timestamp"])
+                if (now - timestamp).total_seconds() > 3600:
+                    tokens_to_remove.append(token)
+            except:
+                tokens_to_remove.append(token)
+        for token in tokens_to_remove:
+            del pending_media[token]
+        if tokens_to_remove:
+            logger.info(f"Cleaned {len(tokens_to_remove)} stale media consents")
+    except Exception as e:
+        logger.error(f"Error cleaning pending media: {e}")
+
+def auto_unban():
+    try:
+        now = datetime.utcnow()
+        with get_conn() as conn:
+            bans = conn.execute("SELECT user_id, ban_until FROM bans WHERE permanent=0 AND ban_until IS NOT NULL").fetchall()
+            for user_id, ban_until in bans:
+                try:
+                    if datetime.fromisoformat(ban_until) < now:
+                        conn.execute("DELETE FROM bans WHERE user_id=?", (user_id,))
+                        conn.commit()
+                        user_warnings[user_id] = 0
+                        try:
+                            bot.send_message(user_id, "✅ Your ban has been lifted! You can use the bot again.")
+                        except:
+                            pass
+                        logger.info(f"Auto-unbanned user {user_id}")
+                except:
+                    pass
+    except Exception as e:
+        logger.error(f"Auto-unban error: {e}")
 
 # -------- WARNING SYSTEM --------
 def is_banned_content(text):
@@ -213,85 +399,78 @@ def is_banned_content(text):
 def warn_user(user_id, reason):
     count = user_warnings.get(user_id, 0) + 1
     user_warnings[user_id] = count
-
     if count >= WARNING_LIMIT:
         db_ban_user(user_id, hours=TEMP_BAN_HOURS, reason=reason)
         user_warnings[user_id] = 0
-
         try:
-            bot.send_message(user_id, f"🚫 BANNED - {TEMP_BAN_HOURS} hours\n\nReason: {reason}\n\nBan will be lifted automatically.")
+            ban_msg = (
+                f"🚫 BANNED - {TEMP_BAN_HOURS} hours\n"
+                f"Reason: {reason}\n"
+                "Ban will be lifted automatically."
+            )
+            bot.send_message(user_id, ban_msg)
         except:
             pass
-
         remove_from_queues(user_id)
         disconnect_user(user_id)
         return "ban"
     else:
         try:
-            bot.send_message(user_id, f"⚠️ WARNING {count}/{WARNING_LIMIT}\n\nReason: {reason}\n\n{WARNING_LIMIT - count} more warnings = BAN!")
+            warn_msg = (
+                f"⚠️ WARNING {count}/{WARNING_LIMIT}\n"
+                f"Reason: {reason}\n"
+                f"{WARNING_LIMIT - count} more warnings = BAN!"
+            )
+            bot.send_message(user_id, warn_msg)
         except:
             pass
         return "warn"
 
-def auto_unban():
-    now = datetime.utcnow()
-    with get_conn() as conn:
-        bans = conn.execute('SELECT user_id, ban_until FROM bans WHERE permanent=0 AND ban_until IS NOT NULL').fetchall()
-        for user_id, ban_until in bans:
-            try:
-                if datetime.fromisoformat(ban_until) <= now:
-                    conn.execute('DELETE FROM bans WHERE user_id=?', (user_id,))
-                    conn.commit()
-                    user_warnings[user_id] = 0
-                    try:
-                        bot.send_message(user_id, "✅ Your ban has been lifted! You can use the bot again.")
-                    except:
-                        pass
-            except:
-                pass
-
 # -------- HELPERS --------
 def remove_from_queues(user_id):
-    global waiting_random, waiting_male, waiting_female
-    for lst in [waiting_random, waiting_male, waiting_female]:
-        if user_id in lst:
-            try:
-                lst.remove(user_id)
-            except:
-                pass
+    global waiting_random, waiting_opposite
+    if user_id in waiting_random:
+        waiting_random.remove(user_id)
+    waiting_opposite = [(uid, gen) for uid, gen in waiting_opposite if uid != user_id]
 
 def disconnect_user(user_id):
-    global active_pairs, pending_media
-    if user_id in pending_media:
-        tokens = [t for t, meta in list(pending_media.items()) if meta.get("sender") == user_id or meta.get("partner") == user_id]
-        for t in tokens:
-            try:
-                del pending_media[t]
-            except:
-                pass
-
+    global active_pairs, pending_media, chat_history
     if user_id in active_pairs:
         partner_id = active_pairs[user_id]
+        chat_history[user_id] = partner_id
+        chat_history[partner_id] = user_id
         if partner_id in active_pairs:
             del active_pairs[partner_id]
         del active_pairs[user_id]
-
         try:
-            bot.send_message(partner_id, "❌ Partner has left the chat.", reply_markup=main_keyboard())
+            bot.send_message(partner_id, "❌ Partner has left the chat.", reply_markup=main_keyboard(partner_id))
         except:
             pass
 
-def main_keyboard():
+    tokens = [t for t, meta in list(pending_media.items()) if meta.get("sender") == user_id or meta.get("partner") == user_id]
+    for t in tokens:
+        try:
+            del pending_media[t]
+        except:
+            pass
+
+def main_keyboard(user_id):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
-    kb.add("/search_random", "/search_male")
-    kb.add("/search_female", "/stop")
-    kb.add("/settings", "/refer")
+    kb.add("🔀 Search Random")
+    u = db_get_user(user_id)
+    if u and u["gender"]:
+        if db_is_premium(user_id):
+            kb.add("🎯 Search Opposite Gender")
+        else:
+            kb.add("🔒 Opposite Gender (Premium)")
+    kb.add("🛑 Stop")
+    kb.add("⚙️ Settings", "👥 Refer")
     return kb
 
 def chat_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
-    kb.add("💬 Tips", "📊 Stats")
-    kb.add("📋 Report", "➡️ Next")
+    kb.add("📊 Stats")
+    kb.add("⚠️ Report", "⏭️ Next")
     kb.add("🛑 Stop")
     return kb
 
@@ -300,41 +479,64 @@ def report_keyboard():
     markup.add(
         types.InlineKeyboardButton("👶 Child Abuse", callback_data="rep:child"),
         types.InlineKeyboardButton("🔞 Pornography", callback_data="rep:porn"),
-        types.InlineKeyboardButton("📢 Spamming", callback_data="rep:spam"),
-        types.InlineKeyboardButton("🚨 Scam/Fraud", callback_data="rep:scam"),
-        types.InlineKeyboardButton("❌ Other", callback_data="rep:other")
+        types.InlineKeyboardButton("📧 Spamming", callback_data="rep:spam"),
+        types.InlineKeyboardButton("💰 Scam/Fraud", callback_data="rep:scam"),
+        types.InlineKeyboardButton("❓ Other", callback_data="rep:other")
     )
     return markup
 
 def generate_media_token(sender_id):
-    return f"{sender_id}:{int(time.time()*1000)}:{secrets.token_hex(4)}"
+    return f"{sender_id}{int(time.time()*1000)}{secrets.token_hex(4)}"
+
+def format_partner_found_message(partner_user, viewer_id):
+    gender_emoji = "👨" if partner_user["gender"] == "Male" else "👩"
+    age_text = str(partner_user["age"]) if partner_user["age"] else "Unknown"
+    country_flag = partner_user["country_flag"] or "🌍"
+    country_name = partner_user["country"] or "Global"
+
+    msg = (
+        "🎉 Partner found! 🎉\n\n"
+        f"🎂 Age: {age_text}\n"
+        f"👤 Gender: {gender_emoji} {partner_user['gender']}\n"
+        f"🌍 Country: {country_flag} {country_name}\n"
+    )
+
+    if viewer_id == ADMIN_ID:
+        partner_name = partner_user["first_name"] or partner_user["username"] or "Unknown"
+        msg += f"\n👤 Name: {partner_name}\n"
+        msg += f"🆔 User ID: {partner_user['user_id']}\n"
+
+    msg += "\n🗨️ Enjoy the chat! Use /next to meet someone new."
+    return msg
 
 # -------- KEEP-ALIVE SYSTEM --------
 def keep_alive_pinger():
-    """Render free tier ko awake rakhne ka system"""
-    PING_INTERVAL = 720  # 12 minutes
-
+    PING_INTERVAL = 720
     def ping_loop():
-        time.sleep(90)  # Bot startup ke baad 1.5 min wait
-
+        time.sleep(90)
         while True:
             try:
-                bot.send_message(
-                    ADMIN_ID,
-                    f"🤖 Keep-Alive\n⏰ {datetime.utcnow().strftime('%H:%M UTC')}\n📊 Active: {len(active_pairs)//2} chats"
+                ping_msg = (
+                    "🤖 Keep-Alive\n"
+                    f"{datetime.utcnow().strftime('%H:%M')} UTC\n"
+                    f"Active: {len(active_pairs)//2} chats"
                 )
-                logger.info("✅ Keep-alive ping sent")
+                bot.send_message(ADMIN_ID, ping_msg)
+                logger.info("Keep-alive ping sent")
+                cleanup_pending_media()
+                auto_unban()
+                if datetime.utcnow().hour == 3:
+                    cleanup_old_reports()
             except Exception as e:
-                logger.error(f"❌ Ping failed: {e}")
-
+                logger.error(f"Ping/cleanup failed: {e}")
             time.sleep(PING_INTERVAL)
 
     thread = threading.Thread(target=ping_loop, daemon=True)
     thread.start()
-    logger.info("🔄 Keep-alive pinger started")
+    logger.info("Keep-alive pinger & cleanup tasks started")
 
 # -------- COMMANDS --------
-@bot.message_handler(commands=["start"])
+@bot.message_handler(commands=['start'])
 def cmd_start(message):
     user = message.from_user
     db_create_user_if_missing(user)
@@ -343,21 +545,41 @@ def cmd_start(message):
         bot.send_message(user.id, "🚫 You are banned from using this bot.")
         return
 
+    if len(message.text.split()) > 1:
+        ref_code = message.text.split()[1]
+        with get_conn() as conn:
+            referrer = conn.execute("SELECT user_id FROM users WHERE referral_code=?", (ref_code,)).fetchone()
+            if referrer and referrer[0] != user.id:
+                db_add_referral(referrer[0])
+                bot.send_message(user.id, "✅ You joined via referral link!")
+
     u = db_get_user(user.id)
     if not u or not u["gender"]:
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
-            types.InlineKeyboardButton("♂️ Male", callback_data="sex:male"),
-            types.InlineKeyboardButton("♀️ Female", callback_data="sex:female")
+            types.InlineKeyboardButton("👨 Male", callback_data="sex:male"),
+            types.InlineKeyboardButton("👩 Female", callback_data="sex:female")
         )
-        bot.send_message(user.id, "👋 Welcome to GhostTalk!\n\n📋 Please select your gender to start:", reply_markup=markup)
+        bot.send_message(user.id, "👋 Welcome to GhostTalk! Please select your gender to start:", reply_markup=markup)
+    elif not u["age"]:
+        bot.send_message(user.id, "Please enter your age (numbers only):")
+    elif not u["country"]:
+        bot.send_message(user.id, "Please enter your country name:")
     else:
-        bot.send_message(user.id, f"👋 Welcome back!\n\n👤 Your Gender: {u['gender']}\n\n🔍 Ready to find a chat partner?", reply_markup=main_keyboard())
+        premium_status = "✅ Premium Active" if db_is_premium(user.id) else "🆓 Free User"
+        welcome_msg = (
+            "👋 Welcome back!\n"
+            f"👤 Gender: {u['gender']}\n"
+            f"🎂 Age: {u['age']}\n"
+            f"🌍 Country: {u['country_flag']} {u['country']}\n"
+            f"{premium_status}\n\n"
+            "Ready to find a chat partner?"
+        )
+        bot.send_message(user.id, welcome_msg, reply_markup=main_keyboard(user.id))
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("sex:"))
 def callback_set_gender(call):
     uid = call.from_user.id
-
     db_create_user_if_missing(call.from_user)
 
     if db_is_banned(uid):
@@ -366,80 +588,95 @@ def callback_set_gender(call):
 
     _, gender = call.data.split(":")
     gender_display = "Male" if gender == "male" else "Female"
+    gender_emoji = "👨" if gender == "male" else "👩"
 
     u = db_get_user(uid)
     if u and u["gender"] == gender_display:
-        bot.answer_callback_query(call.id, f"✅ You are already {gender_display}!", show_alert=True)
+        bot.answer_callback_query(call.id, f"You are already {gender_display}!", show_alert=True)
         return
 
     db_set_gender(uid, gender_display)
-    bot.answer_callback_query(call.id, f"✅ Gender set to {gender_display}!", show_alert=True)
+    bot.answer_callback_query(call.id, "Gender set!", show_alert=True)
 
     try:
-        bot.edit_message_text(f"✅ Gender set to {gender_display}\n\nLet's find a chat partner!", call.message.chat.id, call.message.message_id)
+        bot.edit_message_text(f"✅ Gender set to {gender_emoji} {gender_display}", call.message.chat.id, call.message.message_id)
     except:
         pass
 
     try:
-        bot.send_message(uid, f"✅ Your gender is now set to {gender_display}!\n\n🔍 Use the menu below to find a partner.", reply_markup=main_keyboard())
+        gender_confirm_msg = (
+            f"✅ Gender set to {gender_emoji} {gender_display}\n\n"
+            "Now, please enter your age (numbers only):"
+        )
+        bot.send_message(uid, gender_confirm_msg)
     except:
         pass
 
-@bot.message_handler(commands=["settings"])
+@bot.message_handler(commands=['settings'])
 def cmd_settings(message):
     uid = message.from_user.id
     u = db_get_user(uid)
-
     if not u:
-        bot.send_message(uid, "❌ Use /start first")
+        bot.send_message(uid, "Use /start first")
         return
 
-    text = f"""⚙️ SETTINGS & STATS
+    premium_status = "✅ Premium Active" if db_is_premium(uid) else "🆓 Free User"
+    gender_emoji = "👨" if u["gender"] == "Male" else "👩"
 
-👤 Gender: {u['gender'] or 'Not set'}
-💬 Messages Sent: {u['messages_sent']}
-✅ Media Approved: {u['media_approved']}
-❌ Media Rejected: {u['media_rejected']}
-
-📝 Change Your Gender:"""
+    settings_text = (
+        "⚙️ SETTINGS & STATS\n\n"
+        f"👤 Gender: {gender_emoji} {u['gender'] or 'Not set'}\n"
+        f"🎂 Age: {u['age'] or 'Not set'}\n"
+        f"🌍 Country: {u['country_flag'] or '🌍'} {u['country'] or 'Not set'}\n\n"
+        f"📊 Messages Sent: {u['messages_sent']}\n"
+        f"✅ Media Approved: {u['media_approved']}\n"
+        f"❌ Media Rejected: {u['media_rejected']}\n\n"
+        f"{premium_status}\n\n"
+        "Change Your Gender:"
+    )
 
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("♂️ Male", callback_data="sex:male"),
-        types.InlineKeyboardButton("♀️ Female", callback_data="sex:female")
+        types.InlineKeyboardButton("👨 Male", callback_data="sex:male"),
+        types.InlineKeyboardButton("👩 Female", callback_data="sex:female")
     )
+    bot.send_message(uid, settings_text, reply_markup=markup)
 
-    bot.send_message(uid, text, reply_markup=markup)
-
-@bot.message_handler(commands=["refer"])
+@bot.message_handler(commands=['refer'])
 def cmd_refer(message):
     uid = message.from_user.id
     u = db_get_user(uid)
-
     if not u:
-        bot.send_message(uid, "❌ Use /start first")
+        bot.send_message(uid, "Use /start first")
         return
 
     ref_link = db_get_referral_link(uid)
-    text = f"""🎁 REFERRAL SYSTEM
+    remaining = PREMIUM_REFERRALS_NEEDED - u["referral_count"]
 
-📤 Your Referral Link:
-{ref_link}
+    refer_text = (
+        "👥 REFERRAL SYSTEM\n\n"
+        f"🔗 Your Referral Link:\n{ref_link}\n\n"
+        f"👥 People Referred: {u['referral_count']}/{PREMIUM_REFERRALS_NEEDED}\n"
+        f"🎁 Reward: {PREMIUM_DURATION_HOURS} hour Premium Access\n"
+        "✨ Unlock opposite gender search!\n\n"
+    )
 
-👥 People Referred: {u['referral_count']}
+    if remaining > 0:
+        refer_text += f"Invite {remaining} more to unlock premium!"
+    else:
+        refer_text += "✅ Premium unlocked! Keep inviting for more!"
 
-📋 How it works:
-• Share your link with friends
-• They join with your link
-• You both get rewards!
+    refer_text += (
+        "\n\n📋 How it works:\n"
+        "1️⃣ Share your link with friends\n"
+        "2️⃣ They join with your link\n"
+        f"3️⃣ Get premium after {PREMIUM_REFERRALS_NEEDED} referrals!"
+    )
 
-✅ Share and earn!"""
+    bot.send_message(uid, refer_text)
 
-    bot.send_message(uid, text)
-
-@bot.message_handler(commands=["search_random"])
+@bot.message_handler(commands=['search_random'])
 def cmd_search_random(message):
-    auto_unban()
     uid = message.from_user.id
 
     if db_is_banned(uid):
@@ -448,139 +685,136 @@ def cmd_search_random(message):
 
     u = db_get_user(uid)
     if not u or not u["gender"]:
-        bot.send_message(uid, "❌ Set gender first using /settings")
+        bot.send_message(uid, "Set gender first using /start")
+        return
+
+    if not u["age"] or not u["country"]:
+        bot.send_message(uid, "Complete your profile first with /start")
         return
 
     if uid in active_pairs:
-        bot.send_message(uid, "⚠️ You are already in a chat. Use /next to find new partner.")
+        bot.send_message(uid, "You are already in a chat. Use /next to find new partner.")
         return
 
     remove_from_queues(uid)
     waiting_random.append(uid)
-    bot.send_message(uid, "🔍 Searching for random partner...\n⏳ Please wait")
+    bot.send_message(uid, "🔍 Searching for random partner... Please wait")
     match_users()
 
-@bot.message_handler(commands=["search_male"])
-def cmd_search_male(message):
-    auto_unban()
+@bot.message_handler(commands=['search_opposite_gender'])
+def cmd_search_opposite(message):
     uid = message.from_user.id
 
     if db_is_banned(uid):
         bot.send_message(uid, "🚫 You are banned")
         return
 
-    u = db_get_user(uid)
-    if not u or not u["gender"]:
-        bot.send_message(uid, "❌ Set gender first using /settings")
-        return
-
-    if uid in active_pairs:
-        bot.send_message(uid, "⚠️ You are already in a chat. Use /next to find new partner.")
-        return
-
-    remove_from_queues(uid)
-    waiting_male.append(uid)
-    bot.send_message(uid, "🔍 Searching for male partner...\n⏳ Please wait")
-    match_users()
-
-@bot.message_handler(commands=["search_female"])
-def cmd_search_female(message):
-    auto_unban()
-    uid = message.from_user.id
-
-    if db_is_banned(uid):
-        bot.send_message(uid, "🚫 You are banned")
+    if not db_is_premium(uid):
+        premium_required_msg = (
+            "💎 This feature requires Premium!\n\n"
+            f"Invite {PREMIUM_REFERRALS_NEEDED} friends to unlock {PREMIUM_DURATION_HOURS} hour premium.\n"
+            "Use /refer to get your link!"
+        )
+        bot.send_message(uid, premium_required_msg)
         return
 
     u = db_get_user(uid)
     if not u or not u["gender"]:
-        bot.send_message(uid, "❌ Set gender first using /settings")
+        bot.send_message(uid, "Set gender first using /start")
+        return
+
+    if not u["age"] or not u["country"]:
+        bot.send_message(uid, "Complete your profile first with /start")
         return
 
     if uid in active_pairs:
-        bot.send_message(uid, "⚠️ You are already in a chat. Use /next to find new partner.")
+        bot.send_message(uid, "You are already in a chat. Use /next to find new partner.")
         return
 
     remove_from_queues(uid)
-    waiting_female.append(uid)
-    bot.send_message(uid, "🔍 Searching for female partner...\n⏳ Please wait")
+    waiting_opposite.append((uid, u["gender"]))
+    bot.send_message(uid, "🎯 Searching for opposite gender partner... Please wait")
     match_users()
 
-@bot.message_handler(commands=["stop"])
+@bot.message_handler(commands=['stop'])
 def cmd_stop(message):
     uid = message.from_user.id
     remove_from_queues(uid)
     disconnect_user(uid)
-    bot.send_message(uid, "✅ Stopped searching/chatting.", reply_markup=main_keyboard())
+    bot.send_message(uid, "✅ Stopped searching/chatting.", reply_markup=main_keyboard(uid))
 
-@bot.message_handler(commands=["next"])
+@bot.message_handler(commands=['next'])
 def cmd_next(message):
     uid = message.from_user.id
     if uid not in active_pairs:
-        bot.send_message(uid, "❌ You're not in a chat. Use search commands first.")
+        bot.send_message(uid, "You're not in a chat. Use search commands first.")
         return
-
     disconnect_user(uid)
-    bot.send_message(uid, "🔍 Looking for new partner...", reply_markup=main_keyboard())
+    bot.send_message(uid, "🔍 Looking for new partner...", reply_markup=main_keyboard(uid))
     cmd_search_random(message)
 
-@bot.message_handler(commands=["report"])
+@bot.message_handler(commands=['report'])
 def cmd_report(message):
     uid = message.from_user.id
-    if uid not in active_pairs:
-        bot.send_message(uid, "❌ You need to be in an active chat to report.")
+    if uid not in active_pairs and uid not in chat_history:
+        bot.send_message(uid, "You need to be in an active chat or have recent chat history to report.")
         return
-
-    bot.send_message(uid, "📋 What type of abuse do you want to report?", reply_markup=report_keyboard())
+    bot.send_message(uid, "What type of abuse do you want to report?", reply_markup=report_keyboard())
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rep:"))
 def callback_report(call):
     uid = call.from_user.id
+    partner_id = None
 
-    if uid not in active_pairs:
-        bot.answer_callback_query(call.id, "❌ Not in chat", show_alert=True)
+    if uid in active_pairs:
+        partner_id = active_pairs[uid]
+    elif uid in chat_history:
+        partner_id = chat_history[uid]
+
+    if not partner_id:
+        bot.answer_callback_query(call.id, "No partner to report", show_alert=True)
         return
 
-    partner_id = active_pairs[uid]
     _, report_type = call.data.split(":")
-
     report_type_map = {
-        "child": "👶 Child Abuse",
-        "porn": "🔞 Pornography",
-        "spam": "📢 Spamming",
-        "scam": "🚨 Scam/Fraud",
-        "other": "❌ Other"
+        "child": "Child Abuse",
+        "porn": "Pornography",
+        "spam": "Spamming",
+        "scam": "Scam/Fraud",
+        "other": "Other"
     }
-
     report_type_name = report_type_map.get(report_type, "Other")
 
-    db_add_report(uid, partner_id, report_type, report_type_name)
-    bot.answer_callback_query(call.id, "✅ Report submitted", show_alert=True)
+    reporter = db_get_user(uid)
+    reported = db_get_user(partner_id)
+    reporter_name = reporter["first_name"] or reporter["username"] or "Unknown"
+    reported_name = reported["first_name"] or reported["username"] or "Unknown"
 
+    db_add_report(uid, partner_id, report_type, report_type_name)
+    bot.answer_callback_query(call.id, "Report submitted", show_alert=True)
     bot.send_message(uid, "✅ Your report has been submitted. Admins will review it soon.")
 
     try:
-        admin_msg = f"""⚠️ NEW REPORT
-
-Report Type: {report_type_name}
-Reporter: {uid}
-Reported User: {partner_id}
-Timestamp: {datetime.utcnow().isoformat()}
-
-To ban this user:
-/ban {partner_id} 24 Reported for {report_type}
-
-Or permanent:
-/ban {partner_id} permanent Reported for {report_type}"""
+        admin_msg = (
+            "⚠️ NEW REPORT\n\n"
+            f"Report Type: {report_type_name}\n"
+            f"Reporter: {reporter_name} ({uid})\n"
+            f"Reported User: {reported_name} ({partner_id})\n"
+            f"Timestamp: {datetime.utcnow().isoformat()}\n\n"
+            "To ban this user:\n"
+            f"/ban {partner_id} 24 Reported for {report_type}\n"
+            "Or permanent:\n"
+            f"/ban {partner_id} permanent Reported for {report_type}"
+        )
         bot.send_message(ADMIN_ID, admin_msg)
     except:
         pass
 
-@bot.message_handler(commands=["ban"])
+@bot.message_handler(commands=['ban'])
 def cmd_ban(message):
     logger.info(f"cmd_ban invoked by {message.from_user.id}")
     if message.from_user.id != ADMIN_ID:
-        bot.send_message(message.from_user.id, "❌ You are not admin")
+        bot.send_message(message.from_user.id, "You are not admin")
         return
 
     try:
@@ -588,12 +822,14 @@ def cmd_ban(message):
         parts = text.split(maxsplit=3)
 
         if len(parts) < 2:
-            bot.reply_to(message, """Usage: /ban <user_id> [hours|permanent] [reason]
-
-Examples:
-/ban 123456789 24 Vulgar messages
-/ban 987654321 permanent Child abuse
-/ban 111111111 12 Spamming""")
+            ban_help_text = (
+                "Usage: /ban <user_id> [hours/permanent] [reason]\n\n"
+                "Examples:\n"
+                "/ban 123456789 24 Vulgar messages\n"
+                "/ban 987654321 permanent Child abuse\n"
+                "/ban 111111111 12 Spamming"
+            )
+            bot.reply_to(message, ban_help_text)
             return
 
         target_id = int(parts[1])
@@ -611,34 +847,44 @@ Examples:
                 except:
                     hours = 24
 
-        if len(parts) >= 4:
+        if len(parts) == 4:
             reason = parts[3]
 
         db_ban_user(target_id, hours=hours, permanent=permanent, reason=reason)
 
         if permanent:
-            bot.reply_to(message, f"✅ User {target_id} PERMANENTLY BANNED.\n\nReason: {reason}")
+            bot.reply_to(message, f"✅ User {target_id} PERMANENTLY BANNED. {reason}")
             try:
-                bot.send_message(target_id, f"🚫 You have been PERMANENTLY BANNED.\n\nReason: {reason}\n\nYou cannot use this bot anymore.")
+                ban_msg_perm = (
+                    "🚫 You have been PERMANENTLY BANNED.\n"
+                    f"Reason: {reason}\n"
+                    "You cannot use this bot anymore."
+                )
+                bot.send_message(target_id, ban_msg_perm)
             except:
                 pass
         else:
-            bot.reply_to(message, f"✅ User {target_id} banned for {hours} hours.\n\nReason: {reason}")
+            bot.reply_to(message, f"✅ User {target_id} banned for {hours} hours. {reason}")
             try:
-                bot.send_message(target_id, f"🚫 You have been banned for {hours} hours.\n\nReason: {reason}\n\nBan will be lifted automatically.")
+                ban_msg_temp = (
+                    f"🚫 You have been banned for {hours} hours.\n"
+                    f"Reason: {reason}\n"
+                    "Ban will be lifted automatically."
+                )
+                bot.send_message(target_id, ban_msg_temp)
             except:
                 pass
 
         logger.info(f"Admin {message.from_user.id} banned user {target_id}")
     except ValueError:
-        bot.reply_to(message, "❌ Invalid user ID. Must be a number.")
+        bot.reply_to(message, "Invalid user ID. Must be a number.")
     except Exception as e:
-        bot.reply_to(message, f"❌ Error: {str(e)}")
+        bot.reply_to(message, f"Error: {str(e)}")
 
-@bot.message_handler(commands=["unban"])
+@bot.message_handler(commands=['unban'])
 def cmd_unban(message):
     if message.from_user.id != ADMIN_ID:
-        bot.send_message(message.from_user.id, "❌ You are not admin")
+        bot.send_message(message.from_user.id, "You are not admin")
         return
 
     try:
@@ -656,49 +902,101 @@ def cmd_unban(message):
             bot.send_message(target_id, "✅ Your ban has been lifted! You can use the bot again.")
         except:
             pass
-
         logger.info(f"Admin {message.from_user.id} unbanned user {target_id}")
     except ValueError:
-        bot.reply_to(message, "❌ Invalid user ID. Must be a number.")
+        bot.reply_to(message, "Invalid user ID. Must be a number.")
     except Exception as e:
-        bot.reply_to(message, f"❌ Error: {str(e)}")
+        bot.reply_to(message, f"Error: {str(e)}")
+
+# -------- PREMIUM PURCHASE (COMMENTED OUT) --------
+"""
+@bot.message_handler(commands=['premium'])
+def cmd_premium(message):
+    uid = message.from_user.id
+
+    if db_is_premium(uid):
+        u = db_get_user(uid)
+        expiry = datetime.fromisoformat(u["premium_until"]).strftime("%Y-%m-%d %H:%M")
+        bot.send_message(uid, f"✅ You already have Premium!\nExpires: {expiry}")
+        return
+
+    msg = prompt_premium_purchase(uid)
+
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("💳 1 Month - ₹299", callback_data="pay:monthly"),
+        types.InlineKeyboardButton("💎 3 Months - ₹599", callback_data="pay:quarterly")
+    )
+
+    bot.send_message(uid, msg, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pay:"))
+def callback_payment(call):
+    uid = call.from_user.id
+    _, plan = call.data.split(":")
+
+    # TODO: Integrate actual payment gateway here
+    # For now, show payment instructions
+
+    plan_info = PREMIUM_PRICES[plan]
+    payment_msg = (
+        "💳 Premium Purchase\n\n"
+        f"Plan: {plan_info['label']}\n"
+        f"Amount: ₹{plan_info['amount']}\n\n"
+        "Payment methods:\n"
+        "1️⃣ Paytm: [Payment link here]\n"
+        "2️⃣ International: [Stripe/PayPal link]\n\n"
+        "After payment, send screenshot to admin for verification."
+    )
+
+    bot.answer_callback_query(call.id, "Payment info sent", show_alert=False)
+    bot.send_message(uid, payment_msg)
+
+    # Notify admin
+    admin_msg = f"💰 Payment request from {uid} for {plan_info['label']}"
+    bot.send_message(ADMIN_ID, admin_msg)
+"""
 
 def match_users():
-    global waiting_random, waiting_male, waiting_female, active_pairs
+    global waiting_random, waiting_opposite, active_pairs
 
-    if len(waiting_random) >= 2:
+    while len(waiting_random) >= 2:
         u1 = waiting_random.pop(0)
         u2 = waiting_random.pop(0)
         active_pairs[u1] = u2
         active_pairs[u2] = u1
 
-        msg = "✅ Partner Found!\n\n💬 Chat Tips:\n• Be respectful\n• Be honest\n• No vulgar words\n• No links/spam\n• Have fun!"
-        bot.send_message(u1, msg, reply_markup=chat_keyboard())
-        bot.send_message(u2, msg, reply_markup=chat_keyboard())
+        u1_data = db_get_user(u1)
+        u2_data = db_get_user(u2)
 
-    if len(waiting_male) >= 2:
-        u1 = waiting_male.pop(0)
-        u2 = waiting_male.pop(0)
-        active_pairs[u1] = u2
-        active_pairs[u2] = u1
+        bot.send_message(u1, format_partner_found_message(u2_data, u1), reply_markup=chat_keyboard())
+        bot.send_message(u2, format_partner_found_message(u1_data, u2), reply_markup=chat_keyboard())
 
-        msg = "✅ Male Partner Found!\n\n💬 Chat Tips:\n• Be respectful\n• Be honest\n• No vulgar words\n• No links/spam\n• Have fun!"
-        bot.send_message(u1, msg, reply_markup=chat_keyboard())
-        bot.send_message(u2, msg, reply_markup=chat_keyboard())
+    i = 0
+    while i < len(waiting_opposite):
+        uid, gen = waiting_opposite[i]
+        found = None
+        for j, (other_uid, other_gen) in enumerate(waiting_opposite):
+            if other_uid != uid and other_gen != gen:
+                found = other_uid
+                waiting_opposite.pop(j)
+                break
 
-    if len(waiting_female) >= 2:
-        u1 = waiting_female.pop(0)
-        u2 = waiting_female.pop(0)
-        active_pairs[u1] = u2
-        active_pairs[u2] = u1
+        if found:
+            waiting_opposite.pop(i)
+            active_pairs[uid] = found
+            active_pairs[found] = uid
 
-        msg = "✅ Female Partner Found!\n\n💬 Chat Tips:\n• Be respectful\n• Be honest\n• No vulgar words\n• No links/spam\n• Have fun!"
-        bot.send_message(u1, msg, reply_markup=chat_keyboard())
-        bot.send_message(u2, msg, reply_markup=chat_keyboard())
+            u1_data = db_get_user(uid)
+            u2_data = db_get_user(found)
+
+            bot.send_message(uid, format_partner_found_message(u2_data, uid), reply_markup=chat_keyboard())
+            bot.send_message(found, format_partner_found_message(u1_data, found), reply_markup=chat_keyboard())
+        else:
+            i += 1
 
 @bot.message_handler(func=lambda m: m.content_type == "text" and not m.text.startswith("/"))
 def handler_text(m):
-    auto_unban()
     uid = m.from_user.id
 
     if db_is_banned(uid):
@@ -706,44 +1004,77 @@ def handler_text(m):
         return
 
     db_create_user_if_missing(m.from_user)
+    u = db_get_user(uid)
 
-    if m.text == "💬 Tips":
-        bot.send_message(uid, """💬 CHAT TIPS:
+    if not u["gender"]:
+        bot.send_message(uid, "Please set your gender first using /start")
+        return
 
-✅ Be respectful and polite
-✅ Be honest about yourself
-✅ No vulgar/abusive language
-✅ No links or spam
-✅ No personal info sharing
-✅ Have genuine conversations
-✅ Enjoy the experience!""", reply_markup=chat_keyboard())
+    if not u["age"]:
+        try:
+            age = int(m.text.strip())
+            if age < 13 or age > 100:
+                bot.send_message(uid, "Please enter a valid age (13-100)")
+                return
+            db_set_age(uid, age)
+            bot.send_message(uid, f"✅ Age set to {age}\n\nNow, please enter your country name:")
+            return
+        except:
+            bot.send_message(uid, "Please enter age as numbers only (e.g., 21)")
+            return
+
+    if not u["country"]:
+        country_info = get_country_info(m.text)
+        if not country_info:
+            bot.send_message(uid, f"'{m.text}' is not a valid country name. Please enter a valid country (e.g., India, United States, Indonesia)")
+            return
+        country_name, country_flag = country_info
+        db_set_country(uid, country_name, country_flag)
+        country_complete_msg = (
+            f"✅ Country set to {country_flag} {country_name}\n\n"
+            "Profile complete! Start searching for partners"
+        )
+        bot.send_message(uid, country_complete_msg, reply_markup=main_keyboard(uid))
         return
 
     if m.text == "📊 Stats":
         u = db_get_user(uid)
         if u:
-            bot.send_message(uid, f"""📊 YOUR STATS:
-
-👤 Gender: {u['gender']}
-💬 Messages Sent: {u['messages_sent']}
-✅ Media Approved: {u['media_approved']}
-❌ Media Rejected: {u['media_rejected']}
-👥 People Referred: {u['referral_count']}""", reply_markup=chat_keyboard())
+            premium_status = "✅ Premium Active" if db_is_premium(uid) else "🆓 Free User"
+            gender_emoji = "👨" if u["gender"] == "Male" else "👩"
+            stats_msg = (
+                "📊 YOUR STATS\n\n"
+                f"👤 Gender: {gender_emoji} {u['gender']}\n"
+                f"🎂 Age: {u['age']}\n"
+                f"🌍 Country: {u['country_flag']} {u['country']}\n\n"
+                f"📨 Messages Sent: {u['messages_sent']}\n"
+                f"✅ Media Approved: {u['media_approved']}\n"
+                f"❌ Media Rejected: {u['media_rejected']}\n\n"
+                f"👥 People Referred: {u['referral_count']}\n"
+                f"{premium_status}"
+            )
+            bot.send_message(uid, stats_msg, reply_markup=chat_keyboard())
         return
 
-    if m.text == "📋 Report":
-        if uid in active_pairs:
-            cmd_report(m)
-        else:
-            bot.send_message(uid, "❌ Not in chat")
+    if m.text == "⚠️ Report":
+        cmd_report(m)
         return
 
-    if m.text == "➡️ Next":
+    if m.text == "⏭️ Next":
         cmd_next(m)
         return
 
     if m.text == "🛑 Stop":
         cmd_stop(m)
+        return
+
+    if m.text.startswith("🔒"):
+        premium_locked_msg = (
+            "💎 This feature requires Premium!\n\n"
+            f"Invite {PREMIUM_REFERRALS_NEEDED} friends to unlock {PREMIUM_DURATION_HOURS} hour premium.\n"
+            "Use /refer to get your link!"
+        )
+        bot.send_message(uid, premium_locked_msg)
         return
 
     if is_banned_content(m.text):
@@ -755,17 +1086,16 @@ def handler_text(m):
         try:
             bot.send_message(partner, m.text)
             with get_conn() as conn:
-                conn.execute("UPDATE users SET messages_sent = messages_sent + 1 WHERE user_id=?", (uid,))
+                conn.execute("UPDATE users SET messages_sent=messages_sent+1 WHERE user_id=?", (uid,))
                 conn.commit()
         except Exception as e:
             logger.error(f"Error sending message: {e}")
-            bot.send_message(uid, "❌ Could not send message")
+            bot.send_message(uid, "Could not send message")
     else:
-        bot.send_message(uid, "❌ Not connected. Use search commands.", reply_markup=main_keyboard())
+        bot.send_message(uid, "Not connected. Use search commands.", reply_markup=main_keyboard(uid))
 
 @bot.message_handler(content_types=['photo', 'document', 'video', 'animation', 'sticker'])
 def handle_media(m):
-    auto_unban()
     uid = m.from_user.id
 
     if db_is_banned(uid):
@@ -773,21 +1103,21 @@ def handle_media(m):
         return
 
     if uid not in active_pairs:
-        bot.send_message(uid, "❌ Not connected")
+        bot.send_message(uid, "Not connected")
         return
 
     partner = active_pairs[uid]
     media_type = m.content_type
 
-    if media_type == 'photo':
+    if media_type == "photo":
         media_id = m.photo[-1].file_id
-    elif media_type == 'document':
+    elif media_type == "document":
         media_id = m.document.file_id
-    elif media_type == 'video':
+    elif media_type == "video":
         media_id = m.video.file_id
-    elif media_type == 'animation':
+    elif media_type == "animation":
         media_id = m.animation.file_id
-    elif media_type == 'sticker':
+    elif media_type == "sticker":
         media_id = m.sticker.file_id
     else:
         return
@@ -795,15 +1125,20 @@ def handle_media(m):
     u = db_get_user(uid)
     if u and u["media_approved"] and int(u["media_approved"]) > 0:
         try:
-            if media_type == 'photo': bot.send_photo(partner, media_id)
-            elif media_type == 'document': bot.send_document(partner, media_id)
-            elif media_type == 'video': bot.send_video(partner, media_id)
-            elif media_type == 'animation': bot.send_animation(partner, media_id)
-            elif media_type == 'sticker': bot.send_sticker(partner, media_id)
+            if media_type == "photo":
+                bot.send_photo(partner, media_id)
+            elif media_type == "document":
+                bot.send_document(partner, media_id)
+            elif media_type == "video":
+                bot.send_video(partner, media_id)
+            elif media_type == "animation":
+                bot.send_animation(partner, media_id)
+            elif media_type == "sticker":
+                bot.send_sticker(partner, media_id)
             db_increment_media(uid, "approved")
         except Exception as e:
             logger.error(f"Error forwarding media: {e}")
-            bot.send_message(uid, "❌ Could not forward media")
+            bot.send_message(uid, "Could not forward media")
         return
 
     token = generate_media_token(uid)
@@ -822,14 +1157,15 @@ def handle_media(m):
     )
 
     try:
-        consent_msg = bot.send_message(partner, "📩 Your partner wants to send a media. Tap ✅ Accept to view it, or ❌ Reject to decline.", reply_markup=markup)
+        consent_msg = bot.send_message(partner, "Your partner wants to send a media. Tap Accept to view it, or Reject to decline.", reply_markup=markup)
         pending_media[token]["consent_chat_id"] = consent_msg.chat.id
         pending_media[token]["consent_message_id"] = consent_msg.message_id
-        bot.send_message(uid, "⏳ Consent request sent to your partner. Wait for them to Accept.")
+        bot.send_message(uid, "Consent request sent to your partner. Wait for them to Accept.")
     except Exception as e:
         logger.error(f"Error sending consent: {e}")
-        bot.send_message(uid, "❌ Could not request consent from partner.")
-        if token in pending_media: del pending_media[token]
+        bot.send_message(uid, "Could not request consent from partner.")
+        if token in pending_media:
+            del pending_media[token]
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("app:"))
 def approve_media_cb(call):
@@ -846,24 +1182,29 @@ def approve_media_cb(call):
         file_id = meta["file_id"]
 
         try:
-            if media_type == 'photo':
-                bot.send_photo(partner_id, file_id, caption="📸 Media delivered (accepted).")
-            elif media_type == 'document':
-                bot.send_document(partner_id, file_id, caption="📄 Document delivered (accepted).")
-            elif media_type == 'video':
-                bot.send_video(partner_id, file_id, caption="🎥 Video delivered (accepted).")
-            elif media_type == 'animation':
-                bot.send_animation(partner_id, file_id, caption="🎬 Animation delivered (accepted).")
-            elif media_type == 'sticker':
+            if media_type == "photo":
+                bot.send_photo(partner_id, file_id, caption="Media delivered (accepted).")
+            elif media_type == "document":
+                bot.send_document(partner_id, file_id, caption="Document delivered (accepted).")
+            elif media_type == "video":
+                bot.send_video(partner_id, file_id, caption="Video delivered (accepted).")
+            elif media_type == "animation":
+                bot.send_animation(partner_id, file_id, caption="Animation delivered (accepted).")
+            elif media_type == "sticker":
                 bot.send_sticker(partner_id, file_id)
         except Exception as e:
             logger.error(f"Error delivering media: {e}")
-            try: bot.send_message(partner_id, "❌ Could not deliver the media.")
-            except: pass
-            try: bot.send_message(sender_id, "❌ Your media could not be delivered.")
-            except: pass
-            if token in pending_media: del pending_media[token]
-            bot.answer_callback_query(call.id, "❌ Error delivering media", show_alert=True)
+            try:
+                bot.send_message(partner_id, "Could not deliver the media.")
+            except:
+                pass
+            try:
+                bot.send_message(sender_id, "Your media could not be delivered.")
+            except:
+                pass
+            if token in pending_media:
+                del pending_media[token]
+            bot.answer_callback_query(call.id, "Error delivering media", show_alert=True)
             return
 
         try:
@@ -880,19 +1221,19 @@ def approve_media_cb(call):
         try:
             chat_id = meta.get("consent_chat_id", call.message.chat.id)
             msg_id = meta.get("consent_message_id", call.message.message_id)
-            bot.edit_message_text("✅ Partner accepted — media delivered.", chat_id, msg_id)
+            bot.edit_message_text("✅ Partner accepted - media delivered.", chat_id, msg_id)
         except:
             try:
-                bot.edit_message_text("✅ Partner accepted — media delivered.", call.message.chat.id, call.message.message_id)
+                bot.edit_message_text("✅ Partner accepted - media delivered.", call.message.chat.id, call.message.message_id)
             except:
                 pass
 
-        bot.answer_callback_query(call.id, "✅ Media Approved", show_alert=False)
-        if token in pending_media: del pending_media[token]
-
+        bot.answer_callback_query(call.id, "Media Approved", show_alert=False)
+        if token in pending_media:
+            del pending_media[token]
     except Exception as e:
         logger.error(f"Error in approve_media_cb: {e}")
-        bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
+        bot.answer_callback_query(call.id, "Error", show_alert=True)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rej:"))
 def reject_media_cb(call):
@@ -922,36 +1263,35 @@ def reject_media_cb(call):
             except:
                 pass
 
-        bot.answer_callback_query(call.id, "❌ Media Rejected", show_alert=False)
-        if token in pending_media: del pending_media[token]
-
+        bot.answer_callback_query(call.id, "Media Rejected", show_alert=False)
+        if token in pending_media:
+            del pending_media[token]
     except Exception as e:
         logger.error(f"Error in reject_media_cb: {e}")
-        bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
+        bot.answer_callback_query(call.id, "Error", show_alert=True)
 
 # -------- BOT POLLING THREAD --------
 def run_bot_polling():
-    """Separate thread me bot polling chalega"""
-    logger.info("🤖 Starting Telegram bot polling...")
+    logger.info("Starting Telegram bot polling...")
     try:
         bot.infinity_polling(timeout=60, long_polling_timeout=60)
     except Exception as e:
-        logger.error(f"❌ Bot polling error: {e}")
+        logger.error(f"Bot polling error: {e}")
 
 # -------- MAIN EXECUTION --------
 if __name__ == "__main__":
     init_db()
-    logger.info("✅ Database initialized")
+    logger.info("Database initialized")
 
     keep_alive_pinger()
 
     bot_thread = threading.Thread(target=run_bot_polling, daemon=True)
     bot_thread.start()
-    logger.info("✅ Bot polling thread started")
+    logger.info("Bot polling thread started")
 
     PORT = int(os.getenv("PORT", 10000))
-    logger.info(f"🌐 Starting Flask on port {PORT}")
-    logger.info(f"👤 Admin ID: {ADMIN_ID}")
-    logger.info(f"🤖 Bot username: @{BOT_USERNAME}")
+    logger.info(f"Starting Flask on port {PORT}")
+    logger.info(f"Admin ID: {ADMIN_ID}")
+    logger.info(f"Bot username: {BOT_USERNAME}")
 
     app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
