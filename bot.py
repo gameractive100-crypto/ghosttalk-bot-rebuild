@@ -1,4 +1,3 @@
-```python
 #!/usr/bin/env python3
 """
 GhostTalk Premium Bot - FINAL FIXED v2.2
