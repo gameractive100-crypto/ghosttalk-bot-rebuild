@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
 """
 GhostTalk Premium Bot - FINAL PRODUCTION v3.4
-✅ ALL FIXES APPLIED
-✅ /n escape sequences fixed
-✅ Chat continues after report
-✅ Games don't lock chat
-✅ Duplicate gender removed
-✅ /ban @username working
-✅ Zero errors - production stable
-✅ Single file - copy-paste ready
-
-Requirements: pip install pyTelegramBotAPI flask requests
+✅ ALL FIXES APPLIED (minimal, non-invasive)
+- Runtime fix: literal "\\n" → newline before sending (no need to edit all strings)
+- After gender selection, user is immediately asked for age
+- No other logic changed
 """
 
 import os
@@ -51,6 +45,31 @@ logger.info(f"🔧 BASE_DIR: {BASE_DIR}, DB_PATH: {DB_PATH}")
 # ============= TELEBOT & FLASK =============
 bot = telebot.TeleBot(API_TOKEN)
 app = Flask(__name__)
+
+# ---------- Minimal Runtime Fix (non-invasive) ----------
+# Replace literal "\n" (backslash + n) with actual newline before sending messages.
+# This keeps your original string literals unchanged but fixes display in Telegram.
+try:
+    _original_send_message = bot.send_message
+    _original_answer_callback_query = bot.answer_callback_query
+except Exception:
+    _original_send_message = None
+    _original_answer_callback_query = None
+
+def _fix_text(s):
+    if isinstance(s, str):
+        return s.replace("\\n", "\n")
+    return s
+
+if _original_send_message:
+    def _send_message(chat_id, text, *args, **kwargs):
+        return _original_send_message(chat_id, _fix_text(text), *args, **kwargs)
+    bot.send_message = _send_message
+
+if _original_answer_callback_query:
+    def _answer_callback_query(callback_id, text=None, *args, **kwargs):
+        return _original_answer_callback_query(callback_id, _fix_text(text) if text is not None else text, *args, **kwargs)
+    bot.answer_callback_query = _answer_callback_query
 
 # ============= RUNTIME DATA =============
 waiting_random = []
@@ -576,6 +595,14 @@ def callback_set_gender(call):
         bot.edit_message_text(f"✅ Gender: {gender_display}", call.message.chat.id, call.message.message_id)
     except:
         pass
+    # NEW: Immediately prompt for age after gender selection if age not set
+    u = db_get_user(uid)
+    if not u or not u.get("age"):
+        try:
+            bot.send_message(uid, "📍 Enter your age (12-99 only):")
+            bot.register_next_step_handler(call.message, process_new_age)
+        except:
+            pass
 
 @bot.message_handler(commands=['settings'])
 def cmd_settings(message):
@@ -698,6 +725,7 @@ def cmd_refer(message):
     )
     if remaining > 0:
         refer_text += f"📍 Invite {remaining} more friends to unlock premium!"
+
     else:
         refer_text += "✅ Premium unlocked! Keep inviting for more!"
     refer_text += (
