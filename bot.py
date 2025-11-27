@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
-GhostTalk Premium Bot - FINAL FIXED v2.2
-- Same as v2.1 but admin commands /pradd /prrem /ban /unban accept either numeric user_id or username (with or without @).
-- No other changes; mirror-style preserved.
+GhostTalk Premium Bot - FINAL MERGED v2.3 - FIXED
+Applied fixes requested by Satyam:
+ - Game: chat & game concurrently, clear turn messages, invite message deletion, /endgame, stuck-game cleanup
+ - Report: redesigned inline options, sends chat history + reporter/partner info to admin, 'Other' allows manual reason
+ - /ban and /prrem improved username resolution
+ - Gender/Age: prevent double prints and duplicate age overwrite; settings change requires explicit action
+ - Disconnect wording changed
+ - Remove stale states on disconnect
+ - Preserve media consent and country/flag logic
+ - Chat logging (in-memory) for sending logs to admin on report
 """
 
 import sqlite3
@@ -25,7 +32,7 @@ if not API_TOKEN:
     raise ValueError("🚨 BOT_TOKEN not found!")
 
 BOT_USERNAME = "SayNymBot"
-ADMIN_ID = int(os.getenv("ADMIN_ID", 8361006824))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "8361006824"))
 OWNER_ID = ADMIN_ID
 DB_PATH = os.getenv("DB_PATH", "ghosttalk_final.db")
 
@@ -36,13 +43,15 @@ PREMIUM_DURATION_HOURS = 1
 
 # -------- BANNED WORDS --------
 BANNED_WORDS = [
-        "fuck", "fucking", "sex chat", "nudes", "pussy", "dick", "cock", "penis", "vagina", "boobs", "tits", "ass", "asshole",
-    "bitch", "slut", "whore", "hoe", "prostitute", "porn", "pornography", "rape", "molest", "anj", "anjing", "babi", "asu","kontl","kontol","puki","memek","jembut" , "mc", "randi", "randika","maderchod","bsdk","lauda","lund","chut","choot","chot","chuut","gand","gaand","ma ka lauda", "mkc", "teri ma ki chut","teri ma ki chuut"
+    "fuck", "fucking", "sex chat", "nudes", "pussy", "dick", "cock", "penis", "vagina", "boobs", "tits", "ass", "asshole",
+    "bitch", "slut", "whore", "hoe", "prostitute", "porn", "pornography", "rape", "molest", "anj", "anjing", "babi", "asu",
+    "kontl","kontol","puki","memek","jembut", "mc", "randi", "randika","maderchod","bsdk","lauda","lund","chut","choot",
+    "chot","chuut","gand","gaand","ma ka lauda", "mkc", "teri ma ki chut","teri ma ki chuut"
 ]
 LINK_PATTERN = re.compile(r'https?://|www\.', re.IGNORECASE)
 BANNED_PATTERNS = [re.compile(rf'\b{re.escape(w)}\b', re.IGNORECASE) for w in BANNED_WORDS]
 
-# -------- FULL 195 COUNTRIES --------
+# -------- FULL COUNTRIES --------
 COUNTRIES = {
     "afghanistan": "🇦🇫", "albania": "🇦🇱", "algeria": "🇩🇿", "andorra": "🇦🇩", "angola": "🇦🇴",
     "antigua and barbuda": "🇦🇬", "argentina": "🇦🇷", "armenia": "🇦🇲", "australia": "🇦🇺", "austria": "🇦🇹",
@@ -119,15 +128,21 @@ def health():
 
 # -------- RUNTIME DATA --------
 waiting_random = []
-waiting_opposite = []
-active_pairs = {}
+waiting_opposite = []           # list of tuples (uid, gender)
+active_pairs = {}               # uid -> partner_uid
 user_warnings = {}
 pending_media = {}
-pending_feedback = {}   # token -> {from, about, msg_id, timestamp}
-chat_history = {}
-age_update_pending = {}
+chat_history = {}               # last partner mapping (uid -> partner_uid)
+age_update_pending = {}         # uid -> True (if changing via settings)
+# Game Data
+pending_game_invites = {}       # invited_user_id -> {'initiator': id, 'game': 'guess'/'word', 'msg_id': int}
+games = {}                      # uid -> shared game state dict
+# Reports
+report_reason_pending = {}      # reporter_id -> ('other', reported_id) when expecting manual text
+# Chat logs (in-memory): key: frozenset({a,b}) -> list of (timestamp_iso, sender_id, text_or_media_desc)
+chat_logs = {}
 
-# -------- DATABASE --------
+# -------- DATABASE (unchanged) --------
 def get_conn():
     conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -153,7 +168,6 @@ def init_db():
             reporter_id INTEGER, reported_id INTEGER,
             report_type TEXT, reason TEXT, timestamp TEXT
         )""")
-        # NEW: feedbacks table to store like/dislike data
         conn.execute("""CREATE TABLE IF NOT EXISTS feedbacks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             from_id INTEGER,
@@ -291,6 +305,11 @@ def db_add_report(reporter_id, reported_id, report_type, reason):
             (reporter_id, reported_id, report_type, reason, datetime.utcnow().isoformat()))
         conn.commit()
 
+def db_get_reporters_for(reported_id):
+    with get_conn() as conn:
+        rows = conn.execute("SELECT DISTINCT reporter_id FROM reports WHERE reported_id=?", (reported_id,)).fetchall()
+        return [r[0] for r in rows]
+
 def db_increment_media(user_id, stat_type):
     with get_conn() as conn:
         if stat_type == "approved":
@@ -299,7 +318,6 @@ def db_increment_media(user_id, stat_type):
             conn.execute("UPDATE users SET media_rejected=media_rejected+1 WHERE user_id=?", (user_id,))
         conn.commit()
 
-# NEW: store feedback
 def db_add_feedback(from_id, about_id, feedback_type):
     with get_conn() as conn:
         conn.execute("""INSERT INTO feedbacks (from_id, about_id, feedback_type, timestamp)
@@ -311,7 +329,7 @@ def resolve_user_identifier(identifier):
     """
     Accepts:
       - numeric string -> returns int
-      - username with or without @ -> tries DB lookup by username, then first_name, then bot.get_chat(@username)
+      - username with or without @ -> tries DB lookup by username, first_name, then bot.get_chat(@username)
     Returns user_id (int) or None if not found.
     """
     if not identifier:
@@ -329,7 +347,7 @@ def resolve_user_identifier(identifier):
     if not uname:
         return None
 
-    # 1) try DB lookup (case-insensitive)
+    # 1) try DB lookup (case-insensitive exact)
     try:
         with get_conn() as conn:
             row = conn.execute("SELECT user_id FROM users WHERE LOWER(username)=?", (uname.lower(),)).fetchone()
@@ -337,6 +355,10 @@ def resolve_user_identifier(identifier):
                 return row[0]
             # fallback: match first_name (less reliable)
             row = conn.execute("SELECT user_id FROM users WHERE LOWER(first_name)=?", (uname.lower(),)).fetchone()
+            if row:
+                return row[0]
+            # broader search: username LIKE
+            row = conn.execute("SELECT user_id FROM users WHERE LOWER(username) LIKE ? LIMIT 1", (f"%{uname.lower()}%",)).fetchone()
             if row:
                 return row[0]
     except Exception as e:
@@ -390,56 +412,6 @@ def remove_from_queues(user_id):
         waiting_random.remove(user_id)
     waiting_opposite = [(uid, gen) for uid, gen in waiting_opposite if uid != user_id]
 
-def send_feedback_prompt(user_id, about_user_id):
-    """
-    Sends feedback buttons to user asking about about_user_id.
-    Stores a token in pending_feedback for callback handling.
-    """
-    try:
-        token = f"fb{user_id}{int(time.time()*1000)}{secrets.token_hex(4)}"
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("👍", callback_data=f"fb_like:{token}"),
-            types.InlineKeyboardButton("👎", callback_data=f"fb_dislike:{token}")
-        )
-        markup.row(types.InlineKeyboardButton("⚠️ Report", callback_data=f"fb_report:{token}"))
-        msg = bot.send_message(user_id,
-            "If you wish, leave your feedback about your partner. It will help us find better partners for you in the future",
-            reply_markup=markup)
-        pending_feedback[token] = {"from": user_id, "about": about_user_id, "msg_id": msg.message_id, "timestamp": datetime.utcnow().isoformat()}
-    except Exception as e:
-        logger.error(f"Error sending feedback prompt to {user_id}: {e}")
-
-def disconnect_user(user_id):
-    global active_pairs
-    if user_id in active_pairs:
-        partner_id = active_pairs[user_id]
-        chat_history[user_id] = partner_id
-        chat_history[partner_id] = user_id
-        try:
-            del active_pairs[partner_id]
-        except:
-            pass
-        try:
-            del active_pairs[user_id]
-        except:
-            pass
-        try:
-            bot.send_message(partner_id, "❌ Partner left chat.\n🔍 Find new partner?", reply_markup=main_keyboard(partner_id))
-        except:
-            pass
-
-        # Send feedback prompt to partner about the user who left
-        try:
-            send_feedback_prompt(partner_id, user_id)
-        except:
-            pass
-        # Also optionally send feedback prompt to the user who left about partner (non-intrusive)
-        try:
-            send_feedback_prompt(user_id, partner_id)
-        except:
-            pass
-
 def main_keyboard(user_id):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
     kb.add("🔀 Search Random")
@@ -462,11 +434,11 @@ def chat_keyboard():
 def report_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
-        types.InlineKeyboardButton("👶 Child Abuse", callback_data="rep:child"),
-        types.InlineKeyboardButton("🔞 Pornography", callback_data="rep:porn"),
-        types.InlineKeyboardButton("📧 Spamming", callback_data="rep:spam"),
-        types.InlineKeyboardButton("💰 Scam/Fraud", callback_data="rep:scam"),
-        types.InlineKeyboardButton("❓ Other", callback_data="rep:other")
+        types.InlineKeyboardButton("🚫 Harassment", callback_data="rep:harass"),
+        types.InlineKeyboardButton("📧 Spam", callback_data="rep:spam"),
+        types.InlineKeyboardButton("🔞 Sexual content / Porn", callback_data="rep:porn"),
+        types.InlineKeyboardButton("💰 Scam / Fraud", callback_data="rep:scam"),
+        types.InlineKeyboardButton("❓ Other (manual reason)", callback_data="rep:other")
     )
     return markup
 
@@ -532,7 +504,22 @@ def match_users():
         bot.send_message(u2, format_partner_found_message(u1_data, u2), reply_markup=chat_keyboard())
         logger.info(f"✅ Random: {u1} <-> {u2}")
 
-# -------- COMMANDS --------
+# -------- CHAT LOGGING HELPER --------
+def log_chat_message(sender_id, recipient_id, text):
+    key = frozenset({sender_id, recipient_id})
+    if not key:
+        return
+    logs = chat_logs.get(key)
+    if logs is None:
+        logs = []
+        chat_logs[key] = logs
+    logs.append((datetime.utcnow().isoformat(), sender_id, text))
+
+def get_chat_logs_between(a, b, limit=500):
+    key = frozenset({a, b})
+    return chat_logs.get(key, [])
+
+# -------- COMMANDS & HANDLERS --------
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     user = message.from_user
@@ -589,21 +576,21 @@ def callback_set_gender(call):
 
     u = db_get_user(uid)
     if u and u["gender"] == gender_display:
+        # Gender double-select prevention: anti-spam reply
         bot.answer_callback_query(call.id, f"Already {gender_display}!", show_alert=True)
         return
 
     db_set_gender(uid, gender_display)
     bot.answer_callback_query(call.id, "✅ Gender set!", show_alert=True)
 
+    # Edit the inline message or send a single confirmation (avoid double printing)
     try:
         bot.edit_message_text(f"✅ Gender: {gender_emoji} {gender_display}", call.message.chat.id, call.message.message_id)
     except:
-        pass
-
-    try:
-        bot.send_message(uid, f"✅ Gender: {gender_emoji} {gender_display}\n")
-    except:
-        pass
+        try:
+            bot.send_message(uid, f"✅ Gender: {gender_emoji} {gender_display}")
+        except:
+            pass
 
 @bot.message_handler(commands=['settings'])
 def cmd_settings(message):
@@ -630,9 +617,7 @@ def cmd_settings(message):
     )
 
     markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("🔗 Refer Link", callback_data="ref:link"),
-    )
+    # Use row to keep UI similar; avoid duplicate gender set
     markup.row(types.InlineKeyboardButton("👨 Male", callback_data="sex:male"), types.InlineKeyboardButton("👩 Female", callback_data="sex:female"))
     markup.row(types.InlineKeyboardButton("🎂 Change Age", callback_data="age:change"))
     markup.row(types.InlineKeyboardButton("🌍 Change Country", callback_data="set:country"))
@@ -642,17 +627,26 @@ def cmd_settings(message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("age:"))
 def callback_change_age(call):
     uid = call.from_user.id
+    # Set a pending flag so process_new_age knows this came from settings change
+    age_update_pending[uid] = True
     bot.send_message(uid, "🎂 Enter new age (12-99):")
     bot.register_next_step_handler(call.message, process_new_age)
 
 def process_new_age(message):
     uid = message.from_user.id
+    pending = age_update_pending.pop(uid, False)
     try:
         age = int(message.text.strip())
         if age < 12 or age > 99:
             bot.send_message(uid, "❌ Age must be 12-99. Try again:")
             bot.register_next_step_handler(message, process_new_age)
             return
+        u = db_get_user(uid)
+        if u and u.get("age") and not pending:
+            # User already has an age and did not explicitly request change
+            bot.send_message(uid, "❌ Your age is already set. Use Settings -> Change Age to update it.")
+            return
+        # If pending True (user clicked change), we allow overwrite
         db_set_age(uid, age)
         bot.send_message(uid, f"✅ Age updated to {age}!", reply_markup=main_keyboard(uid))
     except:
@@ -780,6 +774,13 @@ def cmd_search_random(message):
         bot.send_message(uid, "⏳ Already in chat! Use /next for new partner.")
         return
 
+    # Search spam block: if already searching, show anti-spam message
+    in_waiting_random = uid in waiting_random
+    in_waiting_opposite = any(uid == w[0] for w in waiting_opposite)
+    if in_waiting_random or in_waiting_opposite:
+        bot.send_message(uid, "⏳ You're already in the queue. We'll notify you when we find a partner.  Cancel anytime: /stop")
+        return
+
     remove_from_queues(uid)
     waiting_random.append(uid)
     bot.send_message(uid, "🔍 Searching for random partner...\n⏳ Please wait...")
@@ -811,6 +812,13 @@ def cmd_search_opposite(message):
         bot.send_message(uid, "⏳ Already in chat! Use /next for new partner.")
         return
 
+    # Search spam block for opposite queue
+    in_waiting_random = uid in waiting_random
+    in_waiting_opposite = any(uid == w[0] for w in waiting_opposite)
+    if in_waiting_random or in_waiting_opposite:
+        bot.send_message(uid, "⏳ You're already in the queue. We'll notify you when we find a partner.  Cancel anytime: /stop")
+        return
+
     remove_from_queues(uid)
     waiting_opposite.append((uid, u["gender"]))
     bot.send_message(uid, "🎯 Searching for opposite gender partner...\n⏳ Please wait...")
@@ -821,7 +829,8 @@ def cmd_stop(message):
     uid = message.from_user.id
     remove_from_queues(uid)
     disconnect_user(uid)
-    bot.send_message(uid, "✅ Stopped searching/chatting.", reply_markup=main_keyboard(uid))
+    # Changed wording per request
+    bot.send_message(uid, "🛑 Search and chat stopped. Use the main menu to start again.", reply_markup=main_keyboard(uid))
 
 @bot.message_handler(commands=['next'])
 def cmd_next(message):
@@ -831,7 +840,9 @@ def cmd_next(message):
         return
     disconnect_user(uid)
     bot.send_message(uid, "🔍 Looking for new partner...", reply_markup=main_keyboard(uid))
-    cmd_search_random(message)
+    # Call search_random functionality
+    fake_msg = types.Message.de_json(message.json, bot)  # reuse message object
+    cmd_search_random(fake_msg)
 
 @bot.message_handler(commands=['report'])
 def cmd_report(message):
@@ -839,7 +850,8 @@ def cmd_report(message):
     if uid not in active_pairs and uid not in chat_history:
         bot.send_message(uid, "❌ No active partner to report.")
         return
-    bot.send_message(uid, "⚠️ What type of abuse?", reply_markup=report_keyboard())
+    # Show category-based quick report as required
+    bot.send_message(uid, "⚠️ Select a reason to report your partner:", reply_markup=report_keyboard())
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rep:"))
 def callback_report(call):
@@ -850,28 +862,70 @@ def callback_report(call):
         bot.answer_callback_query(call.id, "No partner to report", show_alert=True)
         return
 
-    _, report_type = call.data.split(":")
-    report_type_map = {
-        "child": "Child Abuse", "porn": "Pornography", "spam": "Spamming",
-        "scam": "Scam/Fraud", "other": "Other"
+    _, report_key = call.data.split(":", 1)
+    report_map = {
+        "harass": ("Harassment", "Harassment"),
+        "spam": ("Spam", "Spam"),
+        "porn": ("Sexual content / Porn", "Sexual Content"),
+        "scam": ("Scam/Fraud", "Scam"),
+        "other": ("Other", "Other")
     }
-    report_type_name = report_type_map.get(report_type, "Other")
+    report_type_name = report_map.get(report_key, ("Other", "Other"))[0]
 
-    db_add_report(uid, partner_id, report_type, report_type_name)
-    bot.answer_callback_query(call.id, "✅ Report submitted", show_alert=True)
-    bot.send_message(uid, "✅ Your report submitted. Admins will review.")
+    if report_key == "other":
+        # ask for manual reason
+        report_reason_pending[uid] = ('other', partner_id)
+        try:
+            bot.answer_callback_query(call.id, "Please type the reason for reporting (short).", show_alert=True)
+        except:
+            pass
+        bot.send_message(uid, "Please describe why you are reporting this partner (short reason):")
+        return
 
+    # Direct report (no free-text)
+    reason_text = report_map.get(report_key, ("Other","Other"))[1]
+    db_add_report(uid, partner_id, report_type_name, reason_text)
+
+    # Send full chat history and reporter/partner info to admin
     try:
+        # gather reporter and partner info
+        reporter_user = db_get_user(uid) or {"username": None, "first_name": None}
+        partner_user = db_get_user(partner_id) or {"username": None, "first_name": None}
+        reporter_display = reporter_user.get("username") or reporter_user.get("first_name") or str(uid)
+        partner_display = partner_user.get("username") or partner_user.get("first_name") or str(partner_id)
+
         admin_msg = (
-            f"⚠️ NEW REPORT\n\n"
+            f"🚩 USER REPORT\n\n"
             f"Type: {report_type_name}\n"
-            f"Reporter: {uid}\n"
-            f"Reported: {partner_id}\n"
-            f"Time: {datetime.utcnow().isoformat()}"
+            f"Reporter: {reporter_display} (ID: {uid})\n"
+            f"Reported: {partner_display} (ID: {partner_id})\n"
+            f"Time: {datetime.utcnow().isoformat()}\n\n"
+            f"--- Chat History Below ---\n"
         )
         bot.send_message(ADMIN_ID, admin_msg)
+        logs = get_chat_logs_between(uid, partner_id)
+        if not logs:
+            bot.send_message(ADMIN_ID, "(No chat log available)")
+        else:
+            # send logs in chunks if long
+            chunk = []
+            for ts, s, txt in logs:
+                sender_name = s if s != uid and s != partner_id else (str(s))
+                chunk.append(f"[{ts}] {s}: {txt}")
+                if len(chunk) >= 20:
+                    bot.send_message(ADMIN_ID, "\n".join(chunk))
+                    chunk = []
+            if chunk:
+                bot.send_message(ADMIN_ID, "\n".join(chunk))
+    except Exception as e:
+        logger.error(f"Error sending report to admin: {e}")
+
+    try:
+        bot.answer_callback_query(call.id, "✅ Report submitted", show_alert=True)
     except:
         pass
+    bot.send_message(uid, "✅ Your report has been submitted. Admins will review it.")
+    return
 
 @bot.message_handler(commands=['pradd'])
 def cmd_pradd(message):
@@ -981,6 +1035,17 @@ def cmd_ban(message):
         except:
             pass
 
+    # Notify reporters that action has been taken (if any)
+    try:
+        reporters = db_get_reporters_for(target_id)
+        for r in reporters:
+            try:
+                bot.send_message(r, "Your report has been reviewed. Action has been taken.")
+            except:
+                pass
+    except Exception as e:
+        logger.error(f"Error notifying reporters after ban: {e}")
+
 @bot.message_handler(commands=['unban'])
 def cmd_unban(message):
     """Admin: /unban [user_id|username]"""
@@ -1008,7 +1073,7 @@ def cmd_unban(message):
     except:
         pass
 
-# -------- MEDIA HANDLERS (unchanged except consent deletion already present) --------
+# -------- MEDIA HANDLERS (unchanged behavior preserved) --------
 @bot.message_handler(content_types=['photo', 'document', 'video', 'animation', 'sticker'])
 def handle_media(m):
     uid = m.from_user.id
@@ -1021,35 +1086,43 @@ def handle_media(m):
         bot.send_message(uid, "❌ Not connected")
         return
 
-    partner = active_pairs[uid]
+    partner_id = active_pairs[uid]
     media_type = m.content_type
 
     if media_type == "photo":
         media_id = m.photo[-1].file_id
+        media_desc = "<photo>"
     elif media_type == "document":
         media_id = m.document.file_id
+        media_desc = "<document>"
     elif media_type == "video":
         media_id = m.video.file_id
+        media_desc = "<video>"
     elif media_type == "animation":
         media_id = m.animation.file_id
+        media_desc = "<animation>"
     elif media_type == "sticker":
         media_id = m.sticker.file_id
+        media_desc = "<sticker>"
     else:
         return
+
+    # Log the media in chat logs
+    log_chat_message(uid, partner_id, f"[media] {media_desc}")
 
     u = db_get_user(uid)
     if u and u["media_approved"]:
         try:
             if media_type == "photo":
-                bot.send_photo(partner, media_id)
+                bot.send_photo(partner_id, media_id)
             elif media_type == "document":
-                bot.send_document(partner, media_id)
+                bot.send_document(partner_id, media_id)
             elif media_type == "video":
-                bot.send_video(partner, media_id)
+                bot.send_video(partner_id, media_id)
             elif media_type == "animation":
-                bot.send_animation(partner, media_id)
+                bot.send_animation(partner_id, media_id)
             elif media_type == "sticker":
-                bot.send_sticker(partner, media_id)
+                bot.send_sticker(partner_id, media_id)
             db_increment_media(uid, "approved")
         except Exception as e:
             logger.error(f"Error: {e}")
@@ -1058,7 +1131,7 @@ def handle_media(m):
 
     token = f"{uid}{int(time.time()*1000)}{secrets.token_hex(4)}"
     pending_media[token] = {
-        "sender": uid, "partner": partner, "media_type": media_type,
+        "sender": uid, "partner": partner_id, "media_type": media_type,
         "file_id": media_id, "msg_id": None, "timestamp": datetime.utcnow().isoformat()
     }
 
@@ -1069,7 +1142,7 @@ def handle_media(m):
     )
 
     try:
-        msg = bot.send_message(partner, f"Your partner sent {media_type}. Accept?", reply_markup=markup)
+        msg = bot.send_message(partner_id, f"Your partner sent {media_type}. Accept?", reply_markup=markup)
         pending_media[token]["msg_id"] = msg.message_id
         bot.send_message(uid, "📤 Consent request sent. Waiting...")
     except Exception as e:
@@ -1117,6 +1190,7 @@ def approve_media_cb(call):
             return
 
         db_increment_media(sender_id, "approved")
+        log_chat_message(sender_id, partner_id, f"[media delivered] {media_type}")
 
         try:
             bot.send_message(sender_id, f"✅ Your {media_type} was ACCEPTED!")
@@ -1153,10 +1227,12 @@ def reject_media_cb(call):
         sender_id = meta["sender"]
         media_type = meta["media_type"]
         msg_id = meta.get("msg_id")
+        partner_id = meta.get("partner")
 
         try:
             bot.send_message(sender_id, f"❌ Your {media_type} was REJECTED.")
             db_increment_media(sender_id, "rejected")
+            log_chat_message(sender_id, partner_id, f"[media rejected] {media_type}")
         except:
             pass
 
@@ -1178,139 +1254,409 @@ def reject_media_cb(call):
         logger.error(f"Error in reject: {e}")
         bot.answer_callback_query(call.id, "Error", show_alert=True)
 
-# -------- FEEDBACK CALLBACKS (NEW) --------
-@bot.callback_query_handler(func=lambda c: c.data.startswith("fb_like:"))
-def fb_like_cb(call):
+# -------- REPORT (new required flow) - manual 'Other' reason handler --------
+@bot.message_handler(func=lambda m: m.from_user.id in report_reason_pending and m.content_type == "text")
+def handle_manual_report_reason(m):
+    uid = m.from_user.id
+    pending = report_reason_pending.pop(uid, None)
+    if not pending:
+        bot.send_message(uid, "No report pending.")
+        return
+    tag, reported = pending
+    if tag != 'other':
+        bot.send_message(uid, "No manual reason expected.")
+        return
+    reason = m.text.strip()
+    if not reason:
+        bot.send_message(uid, "Please type a short reason for reporting:")
+        report_reason_pending[uid] = ('other', reported)
+        return
+
+    db_add_report(uid, reported, "Other", reason)
+    # forward logs and info to admin
     try:
-        token = call.data.split(":", 1)[1]
-        meta = pending_feedback.get(token)
-        if not meta:
-            bot.answer_callback_query(call.id, "Already recorded or expired", show_alert=True)
-            return
+        reporter_user = db_get_user(uid) or {"username": None, "first_name": None}
+        partner_user = db_get_user(reported) or {"username": None, "first_name": None}
+        reporter_display = reporter_user.get("username") or reporter_user.get("first_name") or str(uid)
+        partner_display = partner_user.get("username") or partner_user.get("first_name") or str(reported)
 
-        from_id = meta["from"]
-        about_id = meta["about"]
-        msg_id = meta.get("msg_id")
+        admin_msg = (
+            f"🚩 USER REPORT (Manual)\n\n"
+            f"Reporter: {reporter_display} (ID: {uid})\n"
+            f"Reported: {partner_display} (ID: {reported})\n"
+            f"Reason: {reason}\n"
+            f"Time: {datetime.utcnow().isoformat()}\n\n"
+            f"--- Chat History Below ---\n"
+        )
+        bot.send_message(ADMIN_ID, admin_msg)
+        logs = get_chat_logs_between(uid, reported)
+        if not logs:
+            bot.send_message(ADMIN_ID, "(No chat log available)")
+        else:
+            chunk = []
+            for ts, s, txt in logs:
+                chunk.append(f"[{ts}] {s}: {txt}")
+                if len(chunk) >= 20:
+                    bot.send_message(ADMIN_ID, "\n".join(chunk))
+                    chunk = []
+            if chunk:
+                bot.send_message(ADMIN_ID, "\n".join(chunk))
+    except Exception as e:
+        logger.error(f"Error sending manual report to admin: {e}")
 
-        db_add_feedback(from_id, about_id, "like")
-        bot.answer_callback_query(call.id, "Thanks for your feedback!", show_alert=False)
+    bot.send_message(uid, "✅ Your report has been submitted. Admins will review it.")
+    return
 
-        # Remove feedback buttons or delete prompt
-        try:
-            if msg_id:
-                bot.delete_message(from_id, msg_id)
-        except Exception:
+# -------- GAME SYSTEM (initiator chooses -> partner accept/reject -> start) --------
+@bot.message_handler(commands=['game'])
+def cmd_game(message):
+    uid = message.from_user.id
+    if uid not in active_pairs:
+        bot.send_message(uid, "❌ You must be in a chat to start a game.")
+        return
+    partner_id = active_pairs[uid]
+    # Initiator chooses game
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("🎯 Guess the Number (1-10)", callback_data=f"game_choice:guess:{partner_id}"),
+        types.InlineKeyboardButton("🔗 Word Chain", callback_data=f"game_choice:word:{partner_id}")
+    )
+    bot.send_message(uid, "Choose a game to propose to your partner:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("game_choice:"))
+def callback_game_choice(call):
+    uid = call.from_user.id
+    try:
+        _, game_type, partner_id_str = call.data.split(":", 2)
+        partner_id = int(partner_id_str)
+    except:
+        bot.answer_callback_query(call.id, "Invalid selection", show_alert=True)
+        return
+
+    # verify they are still partners
+    if active_pairs.get(uid) != partner_id:
+        bot.answer_callback_query(call.id, "Partner not connected or changed.", show_alert=True)
+        return
+
+    # create pending invite and send to partner: Do you accept?
+    # store msg id to delete after response
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("✅ Accept", callback_data=f"game_invite_resp:accept:{uid}:{game_type}"),
+        types.InlineKeyboardButton("❌ Reject", callback_data=f"game_invite_resp:reject:{uid}:{game_type}")
+    )
+    desc = "Guess the Number" if game_type == "guess" else "Word Chain"
+    try:
+        sent = bot.send_message(partner_id, f"🎮 Your partner wants to play *{desc}*. Do you accept?", reply_markup=markup, parse_mode='Markdown')
+        pending_game_invites[partner_id] = {'initiator': uid, 'game': game_type, 'msg_id': sent.message_id}
+        bot.send_message(uid, "Invitation sent. Waiting for partner's response...")
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        logger.error(f"Error sending game invite: {e}")
+        bot.answer_callback_query(call.id, "Error sending invite", show_alert=True)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("game_invite_resp:"))
+def callback_game_invite_resp(call):
+    responder = call.from_user.id
+    try:
+        _, resp, initiator_str, game_type = call.data.split(":", 3)
+        initiator_id = int(initiator_str)
+    except:
+        bot.answer_callback_query(call.id, "Invalid response", show_alert=True)
+        return
+
+    invite = pending_game_invites.pop(responder, None)
+    # attempt to delete the invite message in partner's chat (clean UI)
+    try:
+        if invite and invite.get('msg_id'):
             try:
-                if msg_id:
-                    bot.edit_message_reply_markup(from_id, msg_id, reply_markup=None)
+                bot.delete_message(responder, invite.get('msg_id'))
+            except:
+                try:
+                    bot.edit_message_reply_markup(responder, invite.get('msg_id'), reply_markup=None)
+                except:
+                    pass
+    except Exception:
+        pass
+
+    if not invite or invite.get('initiator') != initiator_id or invite.get('game') != game_type:
+        bot.answer_callback_query(call.id, "No matching invitation.", show_alert=True)
+        return
+
+    if resp == "reject":
+        try:
+            bot.send_message(initiator_id, "❌ Your partner declined the game invitation.")
+            bot.send_message(responder, "❌ You declined the game invitation.")
+        except:
+            pass
+        bot.answer_callback_query(call.id)
+        return
+
+    # ACCEPT -> start game
+    if game_type == 'guess':
+        secret = random.randint(1, 10)  # per user's request: 1-10
+        # store shared game state object for both users
+        state = {
+            'type': 'guess',
+            'secret': secret,
+            'guesser': responder,    # partner guesses
+            'initiator': initiator_id
+        }
+        games[initiator_id] = state
+        games[responder] = state
+        try:
+            bot.send_message(initiator_id, "🎮 Game started: Guess the Number (1-10).\nYour partner will try to guess the secret number.\n➡️ You may still chat freely while the game runs.")
+            bot.send_message(responder, "🎮 Game started: Guess the Number (1-10).\nTry to guess the number (send a number 1-10).\n➡️ You may still chat freely while the game runs.")
+        except:
+            pass
+        bot.answer_callback_query(call.id)
+        return
+    else:
+        # Word chain: initiator starts
+        state = {
+            'type': 'word',
+            'turn': initiator_id,
+            'other': responder,
+            'last_letter': None
+        }
+        games[initiator_id] = state
+        games[responder] = state
+        try:
+            bot.send_message(initiator_id, "🎮 Game started: Word Chain.\nYou start. Send the first word.\n➡️ You may still chat freely while the game runs.")
+            bot.send_message(responder, "🎮 Game started: Word Chain.\nWait for partner to send the first word.\n➡️ You may still chat freely while the game runs.")
+        except:
+            pass
+        bot.answer_callback_query(call.id)
+        return
+
+# Game message handler - intercepts messages if user is in a game
+# Important: it will process game-related inputs but WILL NOT block normal chat forwarding.
+def process_game_message(message):
+    uid = message.from_user.id
+    state = games.get(uid)
+    if not state:
+        return {"handled": False}
+
+    # For both games, we will process game-specific inputs but won't block chat messages.
+    # For guess: only digit messages 1-10 from the guesser are treated as guesses.
+    if state['type'] == 'guess':
+        # Only guesser can guess
+        if uid != state['guesser']:
+            # not guesser -> nothing to do for game
+            return {"handled": False}
+        text = (message.text or "").strip()
+        if not text.isdigit():
+            # Not a guess, ignore for game
+            return {"handled": False}
+        guess = int(text)
+        if guess < 1 or guess > 10:
+            try:
+                bot.send_message(uid, "⚠️ Number must be between 1 and 10.")
             except:
                 pass
+            return {"handled": True}
+        secret = state['secret']
+        initiator = state['initiator']
+        if guess == secret:
+            try:
+                bot.send_message(uid, f"🎉 You guessed it! The number was {secret}. You win!")
+                bot.send_message(initiator, f"❌ Your partner guessed the number {secret}. You lose.")
+            except:
+                pass
+            # cleanup both
+            games.pop(uid, None)
+            games.pop(initiator, None)
+            return {"handled": True}
+        elif guess < secret:
+            try:
+                bot.send_message(uid, "📈 Higher!")
+            except:
+                pass
+            return {"handled": True}
+        else:
+            try:
+                bot.send_message(uid, "📉 Lower!")
+            except:
+                pass
+            return {"handled": True}
 
-        # Notify user
+    elif state['type'] == 'word':
+        # Turn-based: only process if it's this user's turn and message looks like a single word
+        if uid != state['turn']:
+            # not this user's turn -> nothing game-specific
+            return {"handled": False}
+        word = (message.text or "").strip().lower()
+        if not word.isalpha():
+            try:
+                bot.send_message(uid, "⚠️ Send a single word (letters only).")
+            except:
+                pass
+            return {"handled": True}
+        last_letter = state['last_letter']
+        if last_letter and word[0] != last_letter:
+            loser = uid
+            winner = state['other'] if state['other'] != uid else state['turn']
+            try:
+                bot.send_message(winner, f"🎉 You win! Your partner used a word not starting with '{last_letter}'.")
+                bot.send_message(loser, f"❌ You lose — the word must start with '{last_letter}'.")
+            except:
+                pass
+            # cleanup both
+            other_id = state['other'] if state['other'] != uid else state['turn']
+            games.pop(uid, None)
+            games.pop(other_id, None)
+            return {"handled": True}
+        # valid move: update last_letter and swap turn/other
+        state['last_letter'] = word[-1]
+        prev_turn = state['turn']
+        next_turn = state['other']
+        state['turn'] = next_turn
+        state['other'] = prev_turn
         try:
-            bot.send_message(from_id, "👍 Thanks! Your feedback has been recorded.")
+            bot.send_message(next_turn, f"➡️ Your turn — send a word starting with '{state['last_letter']}'.")
+            bot.send_message(prev_turn, f"✅ Move accepted. Partner's turn.")
+        except:
+            pass
+        return {"handled": True}
+
+    return {"handled": False}
+
+# -------- ENDGAME COMMAND --------
+@bot.message_handler(commands=['endgame'])
+def cmd_endgame(message):
+    uid = message.from_user.id
+    state = games.get(uid)
+    if not state:
+        bot.send_message(uid, "❌ You are not currently in any game.")
+        return
+    # determine partner
+    partner = state.get('initiator') if state.get('initiator') != uid else state.get('guesser') if state.get('guesser') != uid else state.get('other')
+    if not partner:
+        # try to find in games mapping
+        partner = None
+        for k, v in games.items():
+            if k != uid and v == state:
+                partner = k
+                break
+    # cleanup both
+    try:
+        games.pop(uid, None)
+        if partner:
+            games.pop(partner, None)
+            bot.send_message(partner, "🛑 Game ended by your partner. You may continue chatting freely.")
+    except:
+        pass
+    bot.send_message(uid, "🛑 You ended the game. You may continue chatting freely.")
+
+# -------- DISCONNECT / FEEDBACK CHANGES (no thumbs) --------
+def disconnect_user(user_id):
+    global active_pairs, pending_game_invites, games, pending_media
+    if user_id in active_pairs:
+        partner_id = active_pairs[user_id]
+        # store history mapping
+        chat_history[user_id] = partner_id
+        chat_history[partner_id] = user_id
+        try:
+            del active_pairs[partner_id]
+        except:
+            pass
+        try:
+            del active_pairs[user_id]
         except:
             pass
 
-        # cleanup
-        if token in pending_feedback:
-            del pending_feedback[token]
-    except Exception as e:
-        logger.error(f"Error fb_like: {e}")
-        bot.answer_callback_query(call.id, "Error", show_alert=True)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("fb_dislike:"))
-def fb_dislike_cb(call):
-    try:
-        token = call.data.split(":", 1)[1]
-        meta = pending_feedback.get(token)
-        if not meta:
-            bot.answer_callback_query(call.id, "Already recorded or expired", show_alert=True)
-            return
-
-        from_id = meta["from"]
-        about_id = meta["about"]
-        msg_id = meta.get("msg_id")
-
-        db_add_feedback(from_id, about_id, "dislike")
-        bot.answer_callback_query(call.id, "Feedback noted!", show_alert=False)
-
-        # Remove feedback buttons or delete prompt
+        # Notify both sides with new unique wording
         try:
-            if msg_id:
-                bot.delete_message(from_id, msg_id)
-        except Exception:
-            try:
-                if msg_id:
-                    bot.edit_message_reply_markup(from_id, msg_id, reply_markup=None)
-            except:
-                pass
-
-        try:
-            bot.send_message(from_id, "👎 Thanks! Your feedback has been recorded.")
+            # After end, show a simple Report button (new required flow)
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("🚩 Report", callback_data=f"report_req:{partner_id}"))
+            bot.send_message(partner_id, "❌ Your partner left the chat.\n🔍 Want to find a new partner?", reply_markup=main_keyboard(partner_id))
+            bot.send_message(partner_id, "If needed, report your partner:", reply_markup=kb)
+            # For the leaver, also allow reporting their previous partner
+            kb2 = types.InlineKeyboardMarkup()
+            kb2.add(types.InlineKeyboardButton("🚩 Report", callback_data=f"report_req:{partner_id}"))
+            bot.send_message(user_id, "You left the chat. If you had issues, report your partner:", reply_markup=kb2)
         except:
             pass
 
-        if token in pending_feedback:
-            del pending_feedback[token]
-    except Exception as e:
-        logger.error(f"Error fb_dislike: {e}")
-        bot.answer_callback_query(call.id, "Error", show_alert=True)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("fb_report:"))
-def fb_report_cb(call):
-    try:
-        token = call.data.split(":", 1)[1]
-        meta = pending_feedback.get(token)
-        if not meta:
-            bot.answer_callback_query(call.id, "Already recorded or expired", show_alert=True)
-            return
-
-        from_id = meta["from"]
-        about_id = meta["about"]
-        msg_id = meta.get("msg_id")
-
-        # store as a report
-        db_add_report(from_id, about_id, "feedback_report", "Reported via feedback button")
-
-        bot.answer_callback_query(call.id, "Reported. Admins will review.", show_alert=True)
-
-        # Remove feedback buttons or delete prompt
+        # Cleanup any games between them
         try:
-            if msg_id:
-                bot.delete_message(from_id, msg_id)
-        except Exception:
-            try:
-                if msg_id:
-                    bot.edit_message_reply_markup(from_id, msg_id, reply_markup=None)
-            except:
-                pass
-
-        try:
-            bot.send_message(from_id, "⚠️ Thanks — we've submitted the report to admins.")
-            # Notify admin with details
-            admin_msg = (
-                f"⚠️ REPORT (via feedback button)\n\n"
-                f"Reporter: {from_id}\n"
-                f"Reported: {about_id}\n"
-                f"Time: {datetime.utcnow().isoformat()}\n"
-                f"Context: Report submitted from feedback prompt after chat."
-            )
-            bot.send_message(ADMIN_ID, admin_msg)
+            games.pop(user_id, None)
+            games.pop(partner_id, None)
         except:
             pass
 
-        if token in pending_feedback:
-            del pending_feedback[token]
+        # remove any pending game invites related to them
+        try:
+            keys_to_remove = []
+            for invited, invite in list(pending_game_invites.items()):
+                if invite.get('initiator') == user_id or invited == user_id or invite.get('initiator') == partner_id or invited == partner_id:
+                    keys_to_remove.append(invited)
+            for k in keys_to_remove:
+                try:
+                    # attempt to delete message
+                    msgid = pending_game_invites[k].get('msg_id')
+                    if msgid:
+                        try:
+                            bot.delete_message(k, msgid)
+                        except:
+                            try:
+                                bot.edit_message_reply_markup(k, msgid, reply_markup=None)
+                            except:
+                                pass
+                except:
+                    pass
+                pending_game_invites.pop(k, None)
+        except Exception as e:
+            logger.debug(f"Error cleaning pending_game_invites: {e}")
+
+        # remove pending media involving them
+        try:
+            tokens_to_remove = []
+            for t, meta in list(pending_media.items()):
+                if meta.get('sender') == user_id or meta.get('partner') == user_id or meta.get('sender') == partner_id or meta.get('partner') == partner_id:
+                    tokens_to_remove.append(t)
+            for t in tokens_to_remove:
+                pending_media.pop(t, None)
+        except Exception:
+            pass
+
+        # optionally remove from waiting queues
+        remove_from_queues(user_id)
+        remove_from_queues(partner_id)
+
+# The report button invoked after disconnect: capture its callback
+@bot.callback_query_handler(func=lambda c: c.data.startswith("report_req:"))
+def callback_report_request(call):
+    try:
+        reporter = call.from_user.id
+        _, reported_id_str = call.data.split(":", 1)
+        try:
+            reported_id = int(reported_id_str)
+        except:
+            reported_id = resolve_user_identifier(reported_id_str)
+
+        if not reported_id:
+            bot.answer_callback_query(call.id, "Invalid reported user", show_alert=True)
+            return
+
+        # show the structured report keyboard (no free typing)
+        bot.answer_callback_query(call.id, "Select a reason to report.", show_alert=True)
+        bot.send_message(reporter, "Select a reason to report your partner:", reply_markup=report_keyboard())
     except Exception as e:
-        logger.error(f"Error fb_report: {e}")
+        logger.error(f"callback_report_request error: {e}")
         bot.answer_callback_query(call.id, "Error", show_alert=True)
 
-# -------- TEXT HANDLER (unchanged) --------
+# -------- TEXT HANDLER (with report reason capture & game interception) --------
 @bot.message_handler(func=lambda m: m.content_type == "text" and not m.text.startswith("/"))
 def handler_text(m):
     uid = m.from_user.id
     text = m.text.strip()
+
+    # First: if user is providing a manual report reason (handled by separate handler)
+    if uid in report_reason_pending:
+        # this is handled by handle_manual_report_reason
+        return
 
     if db_is_banned(uid):
         bot.send_message(uid, "🚫 You are banned")
@@ -1319,6 +1665,7 @@ def handler_text(m):
     db_create_user_if_missing(m.from_user)
     u = db_get_user(uid)
 
+    # Profile flows (unchanged behavior, preserved)
     if not u["gender"]:
         bot.send_message(uid, "❌ Set gender first! Use /start")
         return
@@ -1346,7 +1693,12 @@ def handler_text(m):
         bot.send_message(uid, f"✅ Country: {country_flag} {country_name}\n\n🎯 Profile complete!", reply_markup=main_keyboard(uid))
         return
 
-    # -------- BUTTON HANDLERS --------
+    # Intercept game messages first — process but do not block normal chat forwarding
+    game_result = process_game_message(m)
+    # If game_result['handled'] True, we processed a game action; but still allow normal chat forwarding
+    # (This implements concurrent chat + game)
+
+    # BUTTON TEXT HANDLERS (same as original)
     if text == "📊 Stats":
         u = db_get_user(uid)
         if u:
@@ -1398,21 +1750,23 @@ def handler_text(m):
         warn_user(uid, "Vulgar words or links")
         return
 
-    # -------- CHAT MESSAGE --------
+    # CHAT MESSAGE: forward to partner (original behavior preserved) and log it
     if uid in active_pairs:
-        partner = active_pairs[uid]
+        partner_id = active_pairs[uid]
         try:
-            bot.send_message(partner, text)
+            bot.send_message(partner_id, text)
             with get_conn() as conn:
                 conn.execute("UPDATE users SET messages_sent=messages_sent+1 WHERE user_id=?", (uid,))
                 conn.commit()
+            # log for reports
+            log_chat_message(uid, partner_id, text)
         except Exception as e:
             logger.error(f"Error: {e}")
             bot.send_message(uid, "❌ Could not send message")
     else:
         bot.send_message(uid, "❌ Not connected. Use search.", reply_markup=main_keyboard(uid))
 
-# -------- RULES COMMAND (NEW) --------
+# -------- RULES & HELP --------
 @bot.message_handler(commands=['rules'])
 def cmd_rules(message):
     uid = message.from_user.id
@@ -1428,32 +1782,45 @@ def cmd_rules(message):
     )
     bot.send_message(uid, rules_text, parse_mode="Markdown", reply_markup=main_keyboard(uid))
 
-# -------- POLLING & STARTUP HELPERS --------
-def run_bot_polling():
-    logger.info("🤖 Bot polling started...")
-    try:
-        bot.infinity_polling(timeout=60, long_polling_timeout=60)
-    except Exception as e:
-        logger.error(f"❌ Polling error: {e}")
+@bot.message_handler(commands=['help'])
+def cmd_help(message):
+    uid = message.from_user.id
+    help_text = (
+        "🤖 *GhostTalk — Quick Commands*\n\n"
+        "/start - Setup profile / change basic info\n"
+        "/search_random - Find a random partner\n"
+        "/search_opposite_gender - Find opposite-gender partner (Premium)\n"
+        "/next - Skip current partner and find new\n"
+        "/stop - Stop current chat or cancel search\n"
+        "/game - Propose a game to your partner\n"
+        "/endgame - End the current game\n"
+        "/refer - Get your referral link\n"
+        "/rules - Read chat rules\n"
+        "/settings - Profile & settings\n"
+        "/report - Report your current or last partner\n"
+    )
+    bot.send_message(uid, help_text, parse_mode="Markdown")
 
-# -------- SET PUBLIC / ADMIN COMMANDS (NEW) --------
+# -------- BOT COMMANDS (clean) --------
 def set_bot_commands():
     try:
-        # user visible commands (like your screenshot)
         user_cmds = [
-            types.BotCommand("search", "🔍 Find a partner"),
-            types.BotCommand("next", "NEW Stop current dialog and find a new partner"),
-            types.BotCommand("stop", "🛑 Stop current dialog"),
-            types.BotCommand("help", "🆘 How to use the bot"),
-            types.BotCommand("pay", "👑 Search by gender"),
-            types.BotCommand("paysupport", "💰 Payment support"),
-            types.BotCommand("vip", "💎 Become a VIP"),
-            types.BotCommand("link", "🔗 Send your Telegram profile URL"),
-            types.BotCommand("rules", "📘 Read the chat rules")
+            types.BotCommand("start", "🔰 Start / Setup"),
+            types.BotCommand("search_random", "🔍 Find a random partner"),
+            types.BotCommand("search_opposite_gender", "🎯 Find opposite gender (Premium)"),
+            types.BotCommand("next", "⏭️ Next partner"),
+            types.BotCommand("stop", "🛑 Stop searching/chatting"),
+            types.BotCommand("help", "🆘 Help & commands"),
+            types.BotCommand("game", "🎮 Play a game with partner"),
+            types.BotCommand("endgame", "🛑 End current game"),
+            types.BotCommand("refer", "👥 Invite friends"),
+            types.BotCommand("rules", "📘 Chat rules"),
+            types.BotCommand("settings", "⚙️ Profile & settings"),
+            types.BotCommand("report", "🚩 Report partner")
         ]
         bot.set_my_commands(user_cmds)
 
-        # admin commands only visible to admin (hidden from other users)
+        # admin-scoped commands
         try:
             admin_scope = types.BotCommandScopeChat(chat_id=ADMIN_ID)
             admin_cmds = [
@@ -1468,23 +1835,28 @@ def set_bot_commands():
     except Exception as e:
         logger.error(f"Error setting bot commands: {e}")
 
+# -------- POLLING & STARTUP --------
+def run_bot_polling():
+    logger.info("🤖 Bot polling started...")
+    try:
+        bot.infinity_polling(timeout=60, long_polling_timeout=60)
+    except Exception as e:
+        logger.error(f"❌ Polling error: {e}")
+
 if __name__ == "__main__":
     init_db()
-    logger.info("✅ GhostTalk FINAL v2.2 - PRODUCTION READY")
+    logger.info("✅ GhostTalk FINAL merged v2.3 - PRODUCTION READY (fixed)")
     logger.info("✅ Gender + Age columns in settings")
     logger.info("✅ Consent buttons auto-hide and delete")
-    logger.info("✅ Feedback & Report prompt after chat")
-    logger.info("✅ /rules command added")
-    logger.info("✅ Public commands set; admin-only commands scoped")
-    logger.info("✅ Admin commands accept username or user_id")
-
-    # set bot commands (user + admin scope)
+    logger.info("✅ Feedback replaced with structured report flow (asks reason via inline buttons)")
+    logger.info("✅ /rules and /help added")
+    logger.info("✅ Game system fixed: concurrent chat + game, clear turn messages, invite deletion, /endgame")
+    logger.info("✅ Search spam protection implemented")
     set_bot_commands()
 
     bot_thread = threading.Thread(target=run_bot_polling, daemon=True)
     bot_thread.start()
 
-    PORT = int(os.getenv("PORT", 10000))
+    PORT = int(os.getenv("PORT", "10000"))
     logger.info(f"🌍 Flask on port {PORT}")
     app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
-```
