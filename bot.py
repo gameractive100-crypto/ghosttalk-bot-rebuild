@@ -1399,10 +1399,10 @@ def handler_text(m):
         return
     db_create_user_if_missing(m.from_user)
     u = db_get_user(uid)
-    if not u[\"gender\"]:
+    if not u["gender"]:
         bot.send_message(uid, "❌ Set gender first! Use /start")
         return
-    if not u[\"age\"]:
+    if not u["age"]:
         try:
             age = int(text)
             if age < 12 or age > 99:
@@ -1414,7 +1414,7 @@ def handler_text(m):
         except:
             bot.send_message(uid, "❌ Enter age as number (e.g., 21)")
             return
-    if not u[\"country\"]:
+    if not u["country"]:
         country_info = get_country_info(text)
         if not country_info:
             bot.send_message(uid, f"❌ '{text}' not valid.\\n🔍 Try again (e.g., India):")
