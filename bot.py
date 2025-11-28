@@ -809,7 +809,7 @@ def cmd_start(message):
             types.InlineKeyboardButton("♂️ Male", callback_data="sex:male"),
             types.InlineKeyboardButton("♀️ Female", callback_data="sex:female")
         )
-        bot.send_message(user.id, "👋 Welcome to GhostTalk!\n\nSelect your gender:", reply_markup=markup)
+        bot.send_message(user.id, "👋 Welcome to FenLixbot!\n\nSelect your gender:", reply_markup=markup)
         bot.register_next_step_handler(message, lambda m: None)
     elif not u["age"]:
         bot.send_message(user.id, "📅 Enter your age (12-99 only):")
