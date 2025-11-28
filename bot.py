@@ -627,7 +627,7 @@ def forward_full_chat_to_admin(reporter_id, reported_id, report_type):
             f"Time: {datetime.utcnow().isoformat()}"
         )
 
-        reporter_msgs = chat_history.get(reporter_id, [-10:])
+        reporter_msgs = chat_history.get(reporter_id, [])[-10:]
         if reporter_msgs:
             bot.send_message(ADMIN_ID, "📨 Reporter messages:")
             for chat_id, msg_id in reporter_msgs:
