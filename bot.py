@@ -636,7 +636,8 @@ def forward_full_chat_to_admin(reporter_id, reported_id, report_type):
                 except Exception as e:
                     logger.debug(f"Could not forward: {e}")
 
-        reported_msgs = chat_history.get(reported_id, [-10:])
+        reported_msgs = chat_history.get(reported_id, [])[-10:]
+
         if reported_msgs:
             bot.send_message(ADMIN_ID, "📨 Reported user messages:")
             for chat_id, msg_id in reported_msgs:
