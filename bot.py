@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
 GhostTalk Premium Bot - FINAL PRODUCTION v3.4
-✅ ALL FIXES APPLIED (minimal, non-invasive)
-- Runtime fix: literal "\\n" → newline before sending (no need to edit all strings)
-- After gender selection, user is immediately asked for age
-- No other logic changed
+Minimal, non-invasive fixes applied:
+- Fix literal "\n" shown as text (runtime patch)
+- Age -> immediate Country prompt (auto)
+- Prevent duplicate media consent requests
+- /report only when in active chat + basic unique report reasons
+- cmd_start now registers next_step for age to make flow bulletproof
+Everything else kept identical to original structure and logic.
 """
 
 import os
@@ -81,6 +84,9 @@ chat_history = {}
 pending_game_invites = {}
 games = {}
 report_reason_pending = {}
+
+# NEW: track users for whom bot expects country input next (only set when bot asked)
+pending_country = set()
 
 # ============= BANNED WORDS & LINK PATTERN =============
 BANNED_WORDS = [
@@ -466,12 +472,13 @@ def chat_keyboard():
     return kb
 
 def report_keyboard():
+    # NEW: basic, unique four reasons + other
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
-        types.InlineKeyboardButton("Harassment", callback_data="rep:harassment"),
-        types.InlineKeyboardButton("Spam", callback_data="rep:spam"),
-        types.InlineKeyboardButton("Sexual / Porn", callback_data="rep:sexual"),
-        types.InlineKeyboardButton("Scam / Fraud", callback_data="rep:scam"),
+        types.InlineKeyboardButton("🚫 Spam", callback_data="rep:spam"),
+        types.InlineKeyboardButton("📎 Unwanted Content", callback_data="rep:unwanted"),
+        types.InlineKeyboardButton("⚠️ Inappropriate Messages", callback_data="rep:inappropriate"),
+        types.InlineKeyboardButton("🕵️ Suspicious Activity", callback_data="rep:suspicious"),
         types.InlineKeyboardButton("Other", callback_data="rep:other")
     )
     return markup
@@ -561,7 +568,12 @@ def cmd_start(message):
                    types.InlineKeyboardButton("👩 Female", callback_data="sex:female"))
         bot.send_message(user.id, "👋 Welcome to GhostTalk!\\n\\n🎯 Select your gender:", reply_markup=markup)
     elif not u["age"]:
+        # If gender present but age missing, ask age immediately and register next_step
         bot.send_message(user.id, "📍 Enter your age (12-99 only):")
+        try:
+            bot.register_next_step_handler(message, process_new_age)
+        except Exception:
+            pass
     elif not u["country"]:
         bot.send_message(user.id, "🌍 Enter your country name:\\n\\n⚠️ Country CANNOT be changed later unless PREMIUM!")
     else:
@@ -595,11 +607,12 @@ def callback_set_gender(call):
         bot.edit_message_text(f"✅ Gender: {gender_display}", call.message.chat.id, call.message.message_id)
     except:
         pass
-    # NEW: Immediately prompt for age after gender selection if age not set
+    # Immediately prompt for age after gender selection if age not set
     u = db_get_user(uid)
     if not u or not u.get("age"):
         try:
             bot.send_message(uid, "📍 Enter your age (12-99 only):")
+            # register next step to process_new_age directly using the message object
             bot.register_next_step_handler(call.message, process_new_age)
         except:
             pass
@@ -641,17 +654,58 @@ def callback_change_age(call):
 
 def process_new_age(message):
     uid = message.from_user.id
-    try:
-        age = int(message.text.strip())
-        if age < 12 or age > 99:
-            bot.send_message(uid, "❌ Age must be 12-99. Try again:")
-            bot.register_next_step_handler(message, process_new_age)
-            return
-        db_set_age(uid, age)
-        bot.send_message(uid, f"✅ Age updated to {age}!", reply_markup=main_keyboard(uid))
-    except Exception:
+    text = (message.text or "").strip()
+
+    # validate age
+    if not text.isdigit():
         bot.send_message(uid, "❌ Enter age as number (e.g., 21):")
         bot.register_next_step_handler(message, process_new_age)
+        return
+
+    age = int(text)
+    if age < 12 or age > 99:
+        bot.send_message(uid, "❌ Age must be 12-99. Try again:")
+        bot.register_next_step_handler(message, process_new_age)
+        return
+
+    # save age
+    db_set_age(uid, age)
+
+    # ✔️ AUTO ASK COUNTRY IMMEDIATELY (NO WAITING FOR USER MESSAGE)
+    bot.send_message(
+        uid,
+        f"✅ Age: {age}\\n\\n🌍 Enter your country name (e.g., India):\\n⚠️ You cannot change it later!"
+    )
+
+    # mark that we are expecting country from this user and register next-step
+    pending_country.add(uid)
+    try:
+        bot.register_next_step_handler(message, process_new_country)
+    except Exception:
+        # safe fallback: leave pending_country set so handler_text will consider it
+        pass
+
+def process_new_country(message):
+    uid = message.from_user.id
+    text = (message.text or "").strip()
+    # only process country if pending_country expects it
+    if uid not in pending_country:
+        bot.send_message(uid, "Use /settings or /start to change profile.")
+        return
+    country_info = get_country_info(text)
+    if not country_info:
+        bot.send_message(uid, f"❌ '{text}' not valid.\\n🔍 Try again (e.g., India):")
+        # keep pending and re-register
+        try:
+            bot.register_next_step_handler(message, process_new_country)
+        except:
+            pass
+        return
+    country_name, country_flag = country_info
+    db_set_country(uid, country_name, country_flag)
+    # done — remove pending flag
+    pending_country.discard(uid)
+    bot.send_message(uid, f"✅ Country: {country_flag} {country_name}\\n\\n🎯 Profile complete!", reply_markup=main_keyboard(uid))
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ref:"))
 def callback_referral(call):
@@ -691,21 +745,9 @@ def callback_set_country(call):
         bot.answer_callback_query(call.id, "💎 Country change requires PREMIUM!\\n✨ Refer friends to unlock.", show_alert=True)
         return
     bot.send_message(uid, "🌍 Enter your new country name:")
+    # set pending flag and next step
+    pending_country.add(uid)
     bot.register_next_step_handler(call.message, process_new_country)
-
-def process_new_country(message):
-    uid = message.from_user.id
-    text = message.text.strip()
-    if uid != ADMIN_ID and not db_is_premium(uid):
-        bot.send_message(uid, "💎 Country change requires PREMIUM!\\n✨ Refer friends to unlock.")
-        return
-    country_info = get_country_info(text)
-    if not country_info:
-        bot.send_message(uid, f"❌ '{text}' not valid.\\n\\n🔍 Try again (e.g., India, USA, UK):")
-        return
-    country_name, country_flag = country_info
-    db_set_country(uid, country_name, country_flag)
-    bot.send_message(uid, f"✅ Country updated!\\n\\n🌍 Country: {country_flag} {country_name}\\n", reply_markup=main_keyboard(uid))
 
 @bot.message_handler(commands=['refer'])
 def cmd_refer(message):
@@ -725,7 +767,6 @@ def cmd_refer(message):
     )
     if remaining > 0:
         refer_text += f"📍 Invite {remaining} more friends to unlock premium!"
-
     else:
         refer_text += "✅ Premium unlocked! Keep inviting for more!"
     refer_text += (
@@ -812,30 +853,43 @@ def cmd_next(message):
 @bot.message_handler(commands=['report'])
 def cmd_report(message):
     uid = message.from_user.id
-    if uid not in active_pairs and uid not in chat_history:
-        bot.send_message(uid, "❌ No active partner to report.")
+    # ONLY allow reporting when currently in an active chat
+    if uid not in active_pairs:
+        bot.send_message(uid, "❌ You are not in an active chat. You can only report while chatting with someone.")
         return
     bot.send_message(uid, "⚠️ Select reason for report:", reply_markup=report_keyboard())
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rep:"))
 def callback_report(call):
     uid = call.from_user.id
-    partner_id = active_pairs.get(uid) or chat_history.get(uid)
+    # Partner must be currently connected
+    partner_id = active_pairs.get(uid)
     if not partner_id:
-        bot.answer_callback_query(call.id, "No partner to report", show_alert=True)
+        bot.answer_callback_query(call.id, "No active partner to report", show_alert=True)
         return
+
     _, report_type = call.data.split(":")
-    report_type_map = {"harassment":"Harassment", "spam":"Spam", "sexual":"Sexual / Porn", "scam":"Scam / Fraud", "other":"Other"}
+    report_type_map = {
+        "spam": "Spam",
+        "unwanted": "Unwanted Content",
+        "inappropriate": "Inappropriate Messages",
+        "suspicious": "Suspicious Activity",
+        "other": "Other"
+    }
     report_type_name = report_type_map.get(report_type, "Other")
+
     if report_type == "other":
+        # ask for custom reason
         report_reason_pending[uid] = partner_id
         bot.answer_callback_query(call.id, "Please type the reason for reporting (short).", show_alert=True)
         bot.send_message(uid, "Please type the reason for your report (short).")
         return
+
+    # Predefined reason flow
     db_add_report(uid, partner_id, report_type_name, "")
     forward_full_chat_to_admin(uid, partner_id, report_type_name)
     db_ban_user(partner_id, hours=TEMP_BAN_HOURS, reason=report_type_name)
-    bot.send_message(uid, "✅ Your report has been submitted.\\n\\n👮 Admins notified.\\n⏱️ User temp-banned 24hrs.\\n💬 You can keep chatting! ✅")
+    bot.send_message(uid, "✅ Report submitted!\\n\\n👮 Admins reviewing...\\n⏱️ User temp-banned 24hrs.\\n💬 Keep chatting! ✅")
     bot.answer_callback_query(call.id, "Report submitted. Keep chatting! ✅")
 
 @bot.message_handler(commands=['pradd'])
@@ -1050,7 +1104,7 @@ def process_game_message(message):
     if state['type'] == 'guess':
         if uid != state['guesser']:
             return False
-        text = message.text.strip()
+        text = (message.text or "").strip()
         if not text.isdigit():
             bot.send_message(uid, "⚠️ Send a number between 1 and 10.")
             return True
@@ -1320,6 +1374,16 @@ def handle_media(m):
             logger.error(f"Error forwarding media: {e}")
             bot.send_message(uid, "❌ Could not forward media")
         return
+
+    # NEW: Prevent duplicate pending consent requests from same sender -> same partner
+    for t, meta in list(pending_media.items()):
+        try:
+            if meta.get("sender") == uid and meta.get("partner") == partner_id:
+                bot.send_message(uid, "📤 Consent already pending with your partner. Please wait for their response.")
+                return
+        except Exception:
+            continue
+
     token = f"{uid}{int(time.time()*1000)}{secrets.token_hex(4)}"
     pending_media[token] = {"sender": uid, "partner": partner_id, "media_type": media_type, "file_id": media_id, "msg_chat_id": m.chat.id, "msg_id": m.message_id, "timestamp": datetime.utcnow().isoformat()}
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -1424,15 +1488,19 @@ def reject_media_cb(call):
 @bot.message_handler(func=lambda m: True, content_types=['text'])
 def handler_text(m):
     uid = m.from_user.id
-    text = m.text.strip()
+    text = (m.text or "").strip()
 
+    # If user was asked to type a custom report reason
     if uid in report_reason_pending:
         reported = report_reason_pending.pop(uid, None)
         reason = text
-        db_add_report(uid, reported, "Other", reason)
-        forward_full_chat_to_admin(uid, reported, f"Other: {reason}")
-        db_ban_user(reported, hours=TEMP_BAN_HOURS, reason=reason)
-        bot.send_message(uid, "✅ Report submitted!\\n\\n👮 Admins reviewing...\\n⏱️ User temp-banned 24hrs.\\n💬 Keep chatting! ✅")
+        if reported:
+            db_add_report(uid, reported, "Other", reason)
+            forward_full_chat_to_admin(uid, reported, f"Other: {reason}")
+            db_ban_user(reported, hours=TEMP_BAN_HOURS, reason=reason)
+            bot.send_message(uid, "✅ Report submitted!\\n\\n👮 Admins reviewing...\\n⏱️ User temp-banned 24hrs.\\n💬 Keep chatting! ✅")
+        else:
+            bot.send_message(uid, "❌ No partner found to report.")
         return
 
     if db_is_banned(uid):
@@ -1446,6 +1514,7 @@ def handler_text(m):
         bot.send_message(uid, "❌ Set gender first! Use /start")
         return
 
+    # If bot is expecting age (user typed age directly), handle it
     if not u["age"]:
         try:
             age = int(text)
@@ -1453,20 +1522,25 @@ def handler_text(m):
                 bot.send_message(uid, "❌ Age must be 12-99")
                 return
             db_set_age(uid, age)
+            # Immediately prompt for country and register next step
             bot.send_message(uid, f"✅ Age: {age}\\n\\n🌍 Enter country:\\n⚠️ Cannot change unless Premium!")
+            pending_country.add(uid)
+            try:
+                bot.register_next_step_handler(m, process_new_country)
+            except Exception:
+                pass
             return
         except:
             bot.send_message(uid, "❌ Enter age as number (e.g., 21)")
             return
 
-    if not u["country"]:
-        country_info = get_country_info(text)
-        if not country_info:
-            bot.send_message(uid, f"❌ '{text}' not valid.\\n🔍 Try again (e.g., India):")
-            return
-        country_name, country_flag = country_info
-        db_set_country(uid, country_name, country_flag)
-        bot.send_message(uid, f"✅ Country: {country_flag} {country_name}\\n\\n🎯 Profile complete!", reply_markup=main_keyboard(uid))
+    # Only accept country input if bot asked for it (pending_country)
+    if uid in pending_country and not u.get("country"):
+        # Let process_new_country handle it via register_next_step or direct call
+        try:
+            process_new_country(m)
+        except:
+            bot.send_message(uid, "❌ Invalid country input. Try again.")
         return
 
     if uid in games:
