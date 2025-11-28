@@ -1062,7 +1062,7 @@ def callback_game_invite_resp(call):
     if resp == "reject":
         try:
             bot.send_message(initiator_id, "❌ Your partner declined the game invitation.")
-            bot.send_message(responder, "❌ You declined the game invitation.")
+            # bot.send_message(responder, "❌ You declined the game invitation.")
         except:
             pass
         bot.answer_callback_query(call.id)
