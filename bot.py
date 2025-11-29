@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-GhostTalk Premium Bot - FINAL PRODUCTION v4.0
-All fixes applied:
+GhostTalk Premium Bot - FINAL PRODUCTION v5.0
+All requests included:
+- Gender Lock REMOVED (Flexible for everyone)
+- Render Port Fix (Uses os.getenv("PORT"))
 - Report lock-on (chat frozen during report)
 - Auto-ban on 10 reports threshold
 - Reporter notifications (timestamp only, no identity)
-- Independent settings changes (no auto-prompts)
+- Independent settings changes
 - /help command
 - Proper syntax & formatting
 """
@@ -18,7 +20,7 @@ import secrets
 import threading
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import requests
 import telebot
 from telebot import types
@@ -301,7 +303,7 @@ def db_create_user_if_missing(user):
             "INSERT OR IGNORE INTO users (user_id, username, first_name, gender, age, country, "
             "country_flag, joined_at, referral_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (uid, user.username or "", user.first_name or "", None, None, None, None,
-             datetime.utcnow().isoformat(), ref_code)
+             datetime.now(timezone.utc).isoformat(), ref_code)
         )
         conn.commit()
 
@@ -332,7 +334,7 @@ def db_is_premium(user_id):
         return False
 
     try:
-        return datetime.fromisoformat(u["premium_until"]) > datetime.utcnow()
+        return datetime.fromisoformat(u["premium_until"]) > datetime.now(timezone.utc).replace(tzinfo=None)
     except:
         return False
 
@@ -380,7 +382,7 @@ def db_add_referral(user_id):
 
         u = db_get_user(user_id)
         if u and u["referral_count"] >= PREMIUM_REFERRALS_NEEDED:
-            premium_until = (datetime.utcnow() + timedelta(hours=PREMIUM_DURATION_HOURS)).isoformat()
+            premium_until = (datetime.now(timezone.utc) + timedelta(hours=PREMIUM_DURATION_HOURS)).isoformat()
             conn.execute(
                 "UPDATE users SET premium_until = ?, referral_count = 0 WHERE user_id = ?",
                 (premium_until, user_id)
@@ -416,7 +418,7 @@ def db_is_banned(user_id):
 
         if ban_until:
             try:
-                return datetime.fromisoformat(ban_until) > datetime.utcnow()
+                return datetime.fromisoformat(ban_until) > datetime.now(timezone.utc).replace(tzinfo=None)
             except:
                 return False
 
@@ -430,7 +432,7 @@ def db_ban_user(user_id, hours=None, permanent=False, reason=""):
                 (user_id, None, 1, reason)
             )
         else:
-            until = (datetime.utcnow() + timedelta(hours=hours)).isoformat() if hours else None
+            until = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat() if hours else None
             conn.execute(
                 "INSERT OR REPLACE INTO bans (user_id, ban_until, permanent, reason) VALUES (?, ?, ?, ?)",
                 (user_id, until, 0, reason)
@@ -443,7 +445,7 @@ def db_unban_user(user_id):
         conn.commit()
 
 def db_add_report(reporter_id, reported_id, report_type, reason):
-    report_time = datetime.utcnow().isoformat()
+    report_time = datetime.now(timezone.utc).isoformat()
 
     with get_conn() as conn:
         conn.execute(
@@ -461,7 +463,7 @@ def db_add_report(reporter_id, reported_id, report_type, reason):
 
         # AUTO-BAN ON 10 REPORTS
         if count >= 10 and not db_is_banned(reported_id):
-            db_ban_user(reported_id, permanent=False, days=7, reason="Auto-banned: 10+ reports")
+            db_ban_user(reported_id, hours=168, permanent=False, reason="Auto-banned: 10+ reports")
 
             # Notify all reporters (timestamp only, no identity)
             reporters = conn.execute(
@@ -624,7 +626,7 @@ def forward_full_chat_to_admin(reporter_id, reported_id, report_type):
             f"Type: {report_type}\n"
             f"Reporter: {user_label(reporter_id)} ({reporter_id})\n"
             f"Reported: {user_label(reported_id)} ({reported_id})\n"
-            f"Time: {datetime.utcnow().isoformat()}"
+            f"Time: {datetime.now(timezone.utc).isoformat()}"
         )
 
         reporter_msgs = chat_history.get(reporter_id, [])[-10:]
@@ -637,7 +639,6 @@ def forward_full_chat_to_admin(reporter_id, reported_id, report_type):
                     logger.debug(f"Could not forward: {e}")
 
         reported_msgs = chat_history.get(reported_id, [])[-10:]
-
         if reported_msgs:
             bot.send_message(ADMIN_ID, "📨 Reported user messages:")
             for chat_id, msg_id in reported_msgs:
@@ -672,7 +673,7 @@ def main_keyboard(user_id):
 
 def chat_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
-    kb.add("📊 Stats")
+    kb.add("📊 Stats", "🚩 Report")
     kb.add("⏭️ Next", "🛑 Stop")
 
     return kb
@@ -696,8 +697,8 @@ def format_partner_found_message(partner_user, viewer_id):
     country_name = partner_user["country"] or "Global"
 
     msg = "✅ Partner Found!\n\n"
-    msg += f"{gender_emoji} Age: {age_text}\n"
-    msg += f"{gender_emoji} Gender: {partner_user.get('gender') or 'Unknown'}\n"
+    msg += f"🎂 Age: {age_text}\n"
+    msg += f"👤 Gender: {partner_user.get('gender') or 'Unknown'}\n"
     msg += f"{country_flag} Country: {country_name}\n\n"
 
     if viewer_id == ADMIN_ID:
@@ -774,7 +775,7 @@ def home():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}, 200
+    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}, 200
 
 # ============================================
 # BOT HANDLERS: COMMANDS
@@ -809,7 +810,7 @@ def cmd_start(message):
             types.InlineKeyboardButton("♂️ Male", callback_data="sex:male"),
             types.InlineKeyboardButton("♀️ Female", callback_data="sex:female")
         )
-        bot.send_message(user.id, "👋 Welcome to FenLixbot!\n\nSelect your gender:", reply_markup=markup)
+        bot.send_message(user.id, "🌐 Welcome to GhostTalk - Anonymous Chat Platform!\n\n👋 Select your gender to get started:", reply_markup=markup)
         bot.register_next_step_handler(message, lambda m: None)
     elif not u["age"]:
         bot.send_message(user.id, "📅 Enter your age (12-99 only):")
@@ -843,15 +844,20 @@ def callback_set_gender(call):
     gender_display = "Male" if gender == "male" else "Female"
 
     u = db_get_user(uid)
-    if u and u["gender"]:
-        bot.answer_callback_query(call.id, f"Already {gender_display}!", show_alert=True)
-        return
+
+    # ✅ FLEXIBLE GENDER: No Lock!
+    # Log change if already set
+    if u and u["gender"] and u["gender"] != gender_display:
+        try:
+            bot.send_message(ADMIN_ID, f"🔄 Gender Change: {user_label(uid)} | {u['gender']} -> {gender_display}")
+        except:
+            pass
 
     db_set_gender(uid, gender_display)
-    bot.answer_callback_query(call.id, f"Gender set!", show_alert=True)
+    bot.answer_callback_query(call.id, f"✅ Gender set: {gender_display}!", show_alert=True)
 
     try:
-        bot.edit_message_text(f"✅ Gender: {gender_display}", call.message.chat.id, call.message.message_id)
+        bot.edit_message_text(f"✅ Gender updated to: {gender_display}", call.message.chat.id, call.message.message_id)
     except:
         pass
 
@@ -1422,7 +1428,7 @@ def cmd_ban(message):
 
     # Notify reporters (timestamp only, no identity)
     with get_conn() as conn:
-        ban_time = datetime.utcnow().isoformat()
+        ban_time = datetime.now(timezone.utc).isoformat()
         dt = datetime.fromisoformat(ban_time)
         time_str = dt.strftime("%Y-%m-%d at %H:%M")
 
@@ -1634,8 +1640,8 @@ def handler_text(m):
 
             stats_msg = (
                 f"📊 YOUR STATS\n\n"
-                f"{gender_emoji} Gender: {u['gender']}\n"
-                f"📅 Age: {u['age']}\n"
+                f"👤 Gender: {u['gender']}\n"
+                f"🎂 Age: {u['age']}\n"
                 f"🌍 Country: {u['country_flag']} {u['country']}\n\n"
                 f"💬 Messages: {u['messages_sent']}\n"
                 f"📸 Media Approved: {u['media_approved']}\n"
@@ -1646,6 +1652,10 @@ def handler_text(m):
 
             bot.send_message(uid, stats_msg, reply_markup=chat_keyboard())
             return
+
+    if text == "🚩 Report":
+        cmd_report(m)
+        return
 
     if text == "⏭️ Next":
         cmd_next(m)
@@ -1685,6 +1695,10 @@ def handler_text(m):
         return
 
     # Forward to partner
+    if uid in report_reason_pending:
+        bot.send_message(uid, "⛔ Chat locked during report! Waiting for admin review.\nType 'cancel' to exit report.")
+        return
+
     if uid in active_pairs:
         partner_id = active_pairs[uid]
 
@@ -1846,8 +1860,10 @@ if __name__ == "__main__":
     logger.info("Setting up bot commands...")
     setup_bot_commands()
 
-    logger.info("GhostTalk Bot v4.0 FINAL starting...")
+    logger.info("GhostTalk Bot v5.0 FINAL starting...")
     logger.info("All fixes applied:")
+    logger.info("✅ Gender Lock REMOVED (Flexible for all)")
+    logger.info("✅ Render Port Fix (os.getenv('PORT'))")
     logger.info("✅ Report lock-on (chat frozen)")
     logger.info("✅ Auto-ban 10 reports")
     logger.info("✅ Reporter notifications (timestamp only)")
@@ -1855,8 +1871,9 @@ if __name__ == "__main__":
     logger.info("✅ /help command")
     logger.info("✅ Full syntax fixed")
 
-    # Run Flask app for health checks
-    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=5000, debug=False), daemon=True).start()
+    # ✅ FIX FOR RENDER PORT ERROR
+    port = int(os.getenv("PORT", 5000))
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port, debug=False), daemon=True).start()
 
     # Start bot polling
     bot.infinity_polling(timeout=30, long_polling_timeout=30)
