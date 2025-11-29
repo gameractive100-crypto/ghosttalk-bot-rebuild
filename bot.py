@@ -754,7 +754,7 @@ def cmd_start(message):
             types.InlineKeyboardButton("♂️ Male", callback_data="sex:male"),
             types.InlineKeyboardButton("♀️ Female", callback_data="sex:female")
         )
-        bot.send_message(user.id, "🌐 Welcome to GhostTalk - Anonymous Chat!\n\n👋 Select your gender:", reply_markup=markup)
+        bot.send_message(user.id, "🌐 Welcome to FenLix - Anonymous Chat!\n\n👋 Select your gender:", reply_markup=markup)
     elif not u["age"]:
         bot.send_message(user.id, "📅 Enter your age (12-99):")
         bot.register_next_step_handler(message, process_new_age)
