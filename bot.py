@@ -1,3 +1,6 @@
+GhostTalk Bot v3
+
+
 #!/usr/bin/env python3
 """
 GhostTalk Premium Bot - PRODUCTION READY v2.0 - ALL ISSUES FIXED ✅
@@ -626,6 +629,12 @@ def callback_set_gender(call):
         bot.answer_callback_query(call.id, "🚫 You are banned", show_alert=True)
         return
 
+    u = db_get_user(uid)
+    if u and u["gender"]:  # Already has gender set
+        if uid != ADMIN_ID and not db_is_premium(uid):
+            bot.answer_callback_query(call.id, "💎 Gender change requires PREMIUM!\n✨ Refer friends to unlock.", show_alert=True)
+            return
+
     _, gender = call.data.split(":")
     gender_display = "Male" if gender == "male" else "Female"
     gender_emoji = "👨" if gender == "male" else "👩"
@@ -1249,6 +1258,56 @@ def reject_media_cb(call):
     except Exception as e:
         logger.error(f"Reject error: {e}")
         bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
+
+@bot.message_handler(func=lambda message: message.text == "🔀 Search Random")
+def handle_search_random_btn(message):
+    cmd_search_random(message)
+
+@bot.message_handler(func=lambda message: message.text == "🎯 Search Opposite Gender")
+def handle_search_opposite_btn(message):
+    cmd_search_opposite(message)
+
+@bot.message_handler(func=lambda message: message.text == "🛑 Stop")
+def handle_stop_btn(message):
+    cmd_stop(message)
+
+@bot.message_handler(func=lambda message: message.text == "⚙️ Settings")
+def handle_settings_btn(message):
+    cmd_settings(message)
+
+@bot.message_handler(func=lambda message: message.text == "👥 Refer")
+def handle_refer_btn(message):
+    cmd_refer(message)
+
+@bot.message_handler(func=lambda message: message.text == "📊 Stats")
+def handle_stats_btn(message):
+    uid = message.from_user.id
+    u = db_get_user(uid)
+    if not u:
+        bot.send_message(uid, "❌ Profile not found. Use /start")
+        return
+    stats = (
+        "📊 YOUR STATS\n\n"
+        f"📨 Messages Sent: {u['messages_sent']}\n"
+        f"✅ Media Approved: {u['media_approved']}\n"
+        f"❌ Media Rejected: {u['media_rejected']}\n"
+        f"👥 Referred: {u['referral_count']}/3"
+    )
+    bot.send_message(uid, stats, reply_markup=chat_keyboard())
+
+@bot.message_handler(func=lambda message: message.text == "⏭️ Next")
+def handle_next_btn(message):
+    cmd_next(message)
+
+@bot.message_handler(func=lambda message: message.text == "Opposite Gender (Premium) 🔒")
+def handle_premium_locked_btn(message):
+    uid = message.from_user.id
+    premium_msg = (
+        "💎 PREMIUM FEATURE\n\n"
+        f"✨ Invite {PREMIUM_REFERRALS_NEEDED} friends to unlock!\n"
+        "🔗 Use 👥 Refer to get your link."
+    )
+    bot.send_message(uid, premium_msg, reply_markup=main_keyboard(uid))
 
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
