@@ -1,6 +1,3 @@
-GhostTalk Bot v3
-
-
 #!/usr/bin/env python3
 """
 GhostTalk Premium Bot - PRODUCTION READY v2.0 - ALL ISSUES FIXED ✅
