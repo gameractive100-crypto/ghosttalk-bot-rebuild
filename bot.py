@@ -1,12 +1,13 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-GhostTalk Premium Bot - v3.3 FINAL COMPLETE
-✅ Sticker message properly deleted after accept/reject
-✅ Report menu ONLY on /report command
-✅ Auto-ban = 7 days (not immediate)
-✅ /help and /rules commands added
-✅ No report menu on disconnect
-✅ Proper logic throughout
+GhostTalk Premium Bot - v3.9 FINAL
+✅ Setup: Gender → Age → Country (FREE)
+✅ Settings: Gender/Country = PREMIUM, Age = FREE
+✅ Report: Works properly with reasons
+✅ Media: Photos/Videos/Stickers/Voice approval system
+✅ Auto-ban: 7 reports = 7 days ban
+✅ Opposite Gender: PREMIUM only, matches with random queue
+✅ Feedback: Logs only (no storage)
 """
 
 import sqlite3
@@ -34,8 +35,8 @@ DB_PATH = os.getenv("DB_PATH", "ghosttalk.db")
 
 WARNING_LIMIT = 3
 TEMP_BAN_HOURS = 24
-AUTO_BAN_REPORTS = 7  # Ban after 7 reports (not 10)
-AUTO_BAN_DAYS = 7     # 7 days ban
+AUTO_BAN_REPORTS = 7
+AUTO_BAN_DAYS = 7
 PREMIUM_REFERRALS_NEEDED = 3
 PREMIUM_DURATION_HOURS = 24
 
@@ -450,6 +451,7 @@ def disconnect_user(user_id):
                 del active_pairs[user_id]
             try:
                 bot.send_message(partner_id, "❌ Partner left chat.", reply_markup=main_keyboard(partner_id))
+                bot.send_message(partner_id, "🚨 Report partner?", reply_markup=report_keyboard())
             except:
                 pass
 
@@ -768,7 +770,15 @@ def process_new_age(message):
 
     db_set_age(uid, age)
     pending_age.discard(uid)
-    bot.send_message(uid, f"✅ Age: {age} 🎂", reply_markup=main_keyboard(uid))
+
+    # ✅ CHECK: First time setup OR settings change
+    u = db_get_user(uid)
+    if not u["country"]:  # First time - auto-prompt country
+        bot.send_message(uid, f"✅ Age: {age} 🎂\n\n🌍 Now enter your country:")
+        pending_country.add(uid)
+        bot.register_next_step_handler(message, process_new_country)
+    else:  # Settings change - just show main menu
+        bot.send_message(uid, f"✅ Age: {age} 🎂", reply_markup=main_keyboard(uid))
 
 def process_new_country(message):
     uid = message.from_user.id
@@ -914,10 +924,13 @@ def cmd_search_opposite(message):
             bot.send_message(uid, "⏳ Already chatting!")
             return
 
+    opposite_gen = "Male" if u["gender"] == "Female" else "Female"
+    logger.info(f"🎯 {uid} ({u['gender']}) searching opposite ({opposite_gen})")
+
     remove_from_queues(uid)
     with queue_lock:
         waiting_opposite.append((uid, u["gender"]))
-    bot.send_message(uid, "🎯 Searching opposite gender...\n⏳ Wait")
+    bot.send_message(uid, f"🎯 Searching {opposite_gen}...\n⏳ Wait")
     match_users()
 
 @bot.message_handler(commands=['stop'])
@@ -1051,7 +1064,7 @@ def cmd_unban(message):
         conn.commit()
     bot.reply_to(message, f"✅ User {target_id} unbanned")
 
-@bot.message_handler(content_types=['photo', 'document', 'video', 'animation', 'sticker'])
+@bot.message_handler(content_types=['photo', 'document', 'video', 'animation', 'sticker', 'voice', 'audio'])
 def handle_media(m):
     uid = m.from_user.id
 
@@ -1077,6 +1090,10 @@ def handle_media(m):
         media_id = m.animation.file_id
     elif media_type == "sticker":
         media_id = m.sticker.file_id
+    elif media_type == "voice":
+        media_id = m.voice.file_id
+    elif media_type == "audio":
+        media_id = m.audio.file_id
     else:
         return
 
@@ -1093,6 +1110,10 @@ def handle_media(m):
                 bot.send_animation(partner, media_id)
             elif media_type == "sticker":
                 bot.send_sticker(partner, media_id)
+            elif media_type == "voice":
+                bot.send_voice(partner, media_id)
+            elif media_type == "audio":
+                bot.send_audio(partner, media_id)
             db_increment_media(uid, "approved")
             append_chat_history(uid, m.chat.id, m.message_id)
         except:
@@ -1153,6 +1174,10 @@ def approve_media_cb(call):
                 bot.send_animation(partner_id, file_id)
             elif media_type == "sticker":
                 bot.send_sticker(partner_id, file_id)
+            elif media_type == "voice":
+                bot.send_voice(partner_id, file_id)
+            elif media_type == "audio":
+                bot.send_audio(partner_id, file_id)
         except:
             pass
 
