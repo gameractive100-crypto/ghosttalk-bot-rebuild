@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-GhostTalk Premium Bot - v3.9 FINAL
-✅ Setup: Gender → Age → Country (FREE)
-✅ Settings: Gender/Country = PREMIUM, Age = FREE
-✅ Report: Works properly with reasons
-✅ Media: Photos/Videos/Stickers/Voice approval system
-✅ Auto-ban: 7 reports = 7 days ban
-✅ Opposite Gender: PREMIUM only, matches with random queue
-✅ Feedback: Logs only (no storage)
+GhostTalk Premium Anonymous Chat Bot v3.9
+✅ Complete working code with all features
+✅ Opposite gender matching FIXED
+✅ Report system with auto-ban
+✅ Media approval system
+✅ Referral & Premium system
 """
 
 import sqlite3
@@ -27,7 +25,7 @@ from flask import Flask
 # ==================== CONFIG ====================
 API_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not API_TOKEN:
-    raise ValueError("🚨 BOT_TOKEN not found!")
+    raise ValueError("🚨 BOT_TOKEN environment variable not set!")
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", 8361006824))
 OWNER_ID = ADMIN_ID
@@ -44,7 +42,7 @@ PREMIUM_DURATION_HOURS = 24
 BANNED_WORDS = [
     "fuck", "fucking", "sex chat", "nudes", "pussy", "dick", "cock", "penis",
     "vagina", "boobs", "tits", "ass", "asshole", "bitch", "slut", "whore", "hoe",
-    "prostitute", "porn", "pornography", "rape",
+    "prostitute", "porn", "pornography", "rape", "child", "pedo",
     "anj", "anjing", "babi", "asu", "kontl", "kontol", "puki", "memek", "jembut",
     "maderchod", "mc", "bhen ka lauda", "bhenkalauda", "randi", "randika", "gand",
     "bsdk", "chut", "chot", "chuut", "choot", "lund"
@@ -62,48 +60,54 @@ COUNTRIES = {
     "bulgaria": "🇧🇬", "burkina faso": "🇧🇫", "burundi": "🇧🇮", "cambodia": "🇰🇭", "cameroon": "🇨🇲",
     "canada": "🇨🇦", "cape verde": "🇨🇻", "central african republic": "🇨🇫", "chad": "🇹🇩", "chile": "🇨🇱",
     "china": "🇨🇳", "colombia": "🇨🇴", "comoros": "🇰🇲", "congo": "🇨🇬", "costa rica": "🇨🇷",
-    "croatia": "🇭🇷", "cuba": "🇨🇺", "cyprus": "🇨🇾", "czech republic": "🇨🇿", "denmark": "🇩🇰",
-    "djibouti": "🇩🇯", "dominica": "🇩🇲", "dominican republic": "🇩🇴", "ecuador": "🇪🇨", "egypt": "🇪🇬",
-    "el salvador": "🇸🇻", "equatorial guinea": "🇬🇶", "eritrea": "🇪🇷", "estonia": "🇪🇪", "eswatini": "🇸🇿",
-    "ethiopia": "🇪🇹", "fiji": "🇫🇯", "finland": "🇫🇮", "france": "🇫🇷", "gabon": "🇬🇦",
-    "gambia": "🇬🇲", "georgia": "🇬🇪", "germany": "🇩🇪", "ghana": "🇬🇭", "greece": "🇬🇷",
-    "grenada": "🇬🇩", "guatemala": "🇬🇹", "guinea": "🇬🇳", "guinea-bissau": "🇬🇼", "guyana": "🇬🇾",
-    "haiti": "🇭🇹", "honduras": "🇭🇳", "hungary": "🇭🇺", "iceland": "🇮🇸", "india": "🇮🇳",
-    "indonesia": "🇮🇩", "iran": "🇮🇷", "iraq": "🇮🇶", "ireland": "🇮🇪", "israel": "🇮🇱",
-    "italy": "🇮🇹", "jamaica": "🇯🇲", "japan": "🇯🇵", "jordan": "🇯🇴", "kazakhstan": "🇰🇿",
-    "kenya": "🇰🇪", "kiribati": "🇰🇮", "korea north": "🇰🇵", "korea south": "🇰🇷", "kuwait": "🇰🇼",
-    "kyrgyzstan": "🇰🇬", "laos": "🇱🇦", "latvia": "🇱🇻", "lebanon": "🇱🇧", "lesotho": "🇱🇸",
-    "liberia": "🇱🇷", "libya": "🇱🇾", "liechtenstein": "🇱🇮", "lithuania": "🇱🇹", "luxembourg": "🇱🇺",
+    "croatia": "🇭🇷", "cuba": "🇨🇺", "cyprus": "🇨🇾", "czech republic": "🇨🇿", "czechia": "🇨🇿",
+    "denmark": "🇩🇰", "djibouti": "🇩🇯", "dominica": "🇩🇲", "dominican republic": "🇩🇴",
+    "ecuador": "🇪🇨", "egypt": "🇪🇬", "el salvador": "🇸🇻", "equatorial guinea": "🇬🇶",
+    "eritrea": "🇪🇷", "estonia": "🇪🇪", "eswatini": "🇸🇿", "ethiopia": "🇪🇹", "fiji": "🇫🇯",
+    "finland": "🇫🇮", "france": "🇫🇷", "gabon": "🇬🇦", "gambia": "🇬🇲", "georgia": "🇬🇪",
+    "germany": "🇩🇪", "ghana": "🇬🇭", "greece": "🇬🇷", "grenada": "🇬🇩", "guatemala": "🇬🇹",
+    "guinea": "🇬🇳", "guinea-bissau": "🇬🇼", "guyana": "🇬🇾", "haiti": "🇭🇹", "honduras": "🇭🇳",
+    "hungary": "🇭🇺", "iceland": "🇮🇸", "india": "🇮🇳", "indonesia": "🇮🇩", "iran": "🇮🇷",
+    "iraq": "🇮🇶", "ireland": "🇮🇪", "israel": "🇮🇱", "italy": "🇮🇹", "jamaica": "🇯🇲",
+    "japan": "🇯🇵", "jordan": "🇯🇴", "kazakhstan": "🇰🇿", "kenya": "🇰🇪", "kiribati": "🇰🇮",
+    "korea north": "🇰🇵", "korea south": "🇰🇷", "kuwait": "🇰🇼", "kyrgyzstan": "🇰🇬",
+    "laos": "🇱🇦", "latvia": "🇱🇻", "lebanon": "🇱🇧", "lesotho": "🇱🇸", "liberia": "🇱🇷",
+    "libya": "🇱🇾", "liechtenstein": "🇱🇮", "lithuania": "🇱🇹", "luxembourg": "🇱🇺",
     "madagascar": "🇲🇬", "malawi": "🇲🇼", "malaysia": "🇲🇾", "maldives": "🇲🇻", "mali": "🇲🇱",
-    "malta": "🇲🇹", "marshall islands": "🇲🇭", "mauritania": "🇲🇷", "mauritius": "🇲🇺", "mexico": "🇲🇽",
-    "micronesia": "🇫🇲", "moldova": "🇲🇩", "monaco": "🇲🇨", "mongolia": "🇲🇳", "montenegro": "🇲🇪",
-    "morocco": "🇲🇦", "mozambique": "🇲🇿", "myanmar": "🇲🇲", "namibia": "🇳🇦", "nauru": "🇳🇷",
-    "nepal": "🇳🇵", "netherlands": "🇳🇱", "new zealand": "🇳🇿", "nicaragua": "🇳🇮", "niger": "🇳🇪",
-    "nigeria": "🇳🇬", "north macedonia": "🇲🇰", "norway": "🇳🇴", "oman": "🇴🇲", "pakistan": "🇵🇰",
-    "palau": "🇵🇼", "palestine": "🇵🇸", "panama": "🇵🇦", "papua new guinea": "🇵🇬", "paraguay": "🇵🇾",
-    "peru": "🇵🇪", "philippines": "🇵🇭", "poland": "🇵🇱", "portugal": "🇵🇹", "qatar": "🇶🇦",
-    "romania": "🇷🇴", "russia": "🇷🇺", "rwanda": "🇷🇼", "saint kitts and nevis": "🇰🇳", "saint lucia": "🇱🇨",
-    "saint vincent and the grenadines": "🇻🇨", "samoa": "🇼🇸", "san marino": "🇸🇲", "sao tome and principe": "🇸🇹", "saudi arabia": "🇸🇦",
-    "senegal": "🇸🇳", "serbia": "🇷🇸", "seychelles": "🇸🇨", "sierra leone": "🇸🇱", "singapore": "🇸🇬",
-    "slovakia": "🇸🇰", "slovenia": "🇸🇮", "solomon islands": "🇸🇧", "somalia": "🇸🇴", "south africa": "🇿🇦",
-    "south sudan": "🇸🇸", "spain": "🇪🇸", "sri lanka": "🇱🇰", "sudan": "🇸🇩", "suriname": "🇸🇷",
-    "sweden": "🇸🇪", "switzerland": "🇨🇭", "syria": "🇸🇾", "taiwan": "🇹🇼", "tajikistan": "🇹🇯",
-    "tanzania": "🇹🇿", "thailand": "🇹🇭", "timor-leste": "🇹🇱", "togo": "🇹🇬", "tonga": "🇹🇴",
-    "trinidad and tobago": "🇹🇹", "tunisia": "🇹🇳", "turkey": "🇹🇷", "turkmenistan": "🇹🇲", "tuvalu": "🇹🇻",
-    "uganda": "🇺🇬", "ukraine": "🇺🇦", "united arab emirates": "🇦🇪", "united kingdom": "🇬🇧", "united states": "🇺🇸",
-    "uruguay": "🇺🇾", "uzbekistan": "🇺🇿", "vanuatu": "🇻🇺", "vatican city": "🇻🇦", "venezuela": "🇻🇪",
-    "vietnam": "🇻🇳", "yemen": "🇾🇪", "zambia": "🇿🇲", "zimbabwe": "🇿🇼"
+    "malta": "🇲🇹", "marshall islands": "🇲🇭", "mauritania": "🇲🇷", "mauritius": "🇲🇺",
+    "mexico": "🇲🇽", "micronesia": "🇫🇲", "moldova": "🇲🇩", "monaco": "🇲🇨", "mongolia": "🇲🇳",
+    "montenegro": "🇲🇪", "morocco": "🇲🇦", "mozambique": "🇲🇿", "myanmar": "🇲🇲", "namibia": "🇳🇦",
+    "nauru": "🇳🇷", "nepal": "🇳🇵", "netherlands": "🇳🇱", "new zealand": "🇳🇿", "nicaragua": "🇳🇮",
+    "niger": "🇳🇪", "nigeria": "🇳🇬", "north macedonia": "🇲🇰", "norway": "🇳🇴", "oman": "🇴🇲",
+    "pakistan": "🇵🇰", "palau": "🇵🇼", "palestine": "🇵🇸", "panama": "🇵🇦", "papua new guinea": "🇵🇬",
+    "paraguay": "🇵🇾", "peru": "🇵🇪", "philippines": "🇵🇭", "poland": "🇵🇱", "portugal": "🇵🇹",
+    "qatar": "🇶🇦", "romania": "🇷🇴", "russia": "🇷🇺", "rwanda": "🇷🇼", "saint kitts and nevis": "🇰🇳",
+    "saint lucia": "🇱🇨", "saint vincent and the grenadines": "🇻🇨", "samoa": "🇼🇸",
+    "san marino": "🇸🇲", "sao tome and principe": "🇸🇹", "saudi arabia": "🇸🇦", "senegal": "🇸🇳",
+    "serbia": "🇷🇸", "seychelles": "🇸🇨", "sierra leone": "🇸🇱", "singapore": "🇸🇬",
+    "slovakia": "🇸🇰", "slovenia": "🇸🇮", "solomon islands": "🇸🇧", "somalia": "🇸🇴",
+    "south africa": "🇿🇦", "south sudan": "🇸🇸", "spain": "🇪🇸", "sri lanka": "🇱🇰",
+    "sudan": "🇸🇩", "suriname": "🇸🇷", "sweden": "🇸🇪", "switzerland": "🇨🇭", "syria": "🇸🇾",
+    "taiwan": "🇹🇼", "tajikistan": "🇹🇯", "tanzania": "🇹🇿", "thailand": "🇹🇭",
+    "timor-leste": "🇹🇱", "togo": "🇹🇬", "tonga": "🇹🇴", "trinidad and tobago": "🇹🇹",
+    "tunisia": "🇹🇳", "turkey": "🇹🇷", "turkmenistan": "🇹🇲", "tuvalu": "🇹🇻",
+    "uganda": "🇺🇬", "ukraine": "🇺🇦", "united arab emirates": "🇦🇪", "united kingdom": "🇬🇧",
+    "united states": "🇺🇸", "uruguay": "🇺🇾", "uzbekistan": "🇺🇿", "vanuatu": "🇻🇺",
+    "vatican city": "🇻🇦", "venezuela": "🇻🇪", "vietnam": "🇻🇳", "yemen": "🇾🇪",
+    "zambia": "🇿🇲", "zimbabwe": "🇿🇼"
 }
 
 COUNTRY_ALIASES = {
     "usa": "united states", "us": "united states", "america": "united states",
-    "uk": "united kingdom", "britain": "united kingdom",
-    "uae": "united arab emirates",
-    "south korea": "korea south", "north korea": "korea north",
+    "uk": "united kingdom", "britain": "united kingdom", "england": "united kingdom",
+    "uae": "united arab emirates", "emirates": "united arab emirates",
+    "south korea": "korea south", "sk": "korea south",
+    "north korea": "korea north", "nk": "korea north",
     "czechia": "czech republic"
 }
 
 def get_country_info(user_input):
+    """Get country name and flag from user input"""
     normalized = user_input.strip().lower()
     if normalized in COUNTRY_ALIASES:
         normalized = COUNTRY_ALIASES[normalized]
@@ -402,7 +406,7 @@ def user_label(uid):
     return str(uid)
 
 def forward_full_chat_to_admin(reporter_id, reported_id, report_type, reason=""):
-    """🚩 REPORT SYSTEM WITH REASON"""
+    """Forward chat history to admin"""
     try:
         bot.send_message(ADMIN_ID, f"""🚩 NEW REPORT
 Type: {report_type}
@@ -439,6 +443,7 @@ Time: {datetime.utcnow().isoformat()}""")
         logger.error(f"Report error: {e}")
 
 def disconnect_user(user_id):
+    """Disconnect user and show report/feedback options"""
     global active_pairs
     with active_pairs_lock:
         if user_id in active_pairs:
@@ -452,10 +457,20 @@ def disconnect_user(user_id):
             try:
                 bot.send_message(partner_id, "❌ Partner left chat.", reply_markup=main_keyboard(partner_id))
                 bot.send_message(partner_id, "🚨 Report partner?", reply_markup=report_keyboard())
+
+                feedback_markup = types.InlineKeyboardMarkup(row_width=1)
+                feedback_markup.add(
+                    types.InlineKeyboardButton("👍 Good talk", callback_data="fb:good"),
+                    types.InlineKeyboardButton("👎 Rude behavior", callback_data="fb:rude"),
+                    types.InlineKeyboardButton("💤 Boring", callback_data="fb:boring"),
+                    types.InlineKeyboardButton("🎭 Fake profile", callback_data="fb:fake")
+                )
+                bot.send_message(partner_id, "📝 Feedback (optional):", reply_markup=feedback_markup)
             except:
                 pass
 
 def main_keyboard(user_id):
+    """Main menu keyboard"""
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
     kb.add("🔀 Search Random")
     u = db_get_user(user_id)
@@ -470,12 +485,14 @@ def main_keyboard(user_id):
     return kb
 
 def chat_keyboard():
+    """Chat menu keyboard"""
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
     kb.add("📊 Stats")
     kb.add("⏭️ Next", "🛑 Stop")
     return kb
 
 def report_keyboard():
+    """Report reason keyboard"""
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
         types.InlineKeyboardButton("🚫 Spam", callback_data="rep:spam"),
@@ -487,6 +504,7 @@ def report_keyboard():
     return markup
 
 def format_partner_found_message(partner_user, viewer_id):
+    """Format partner found message"""
     gender_emoji = "👨" if partner_user["gender"] == "Male" else "👩"
     age_text = str(partner_user["age"]) if partner_user["age"] else "Unknown"
     country_flag = partner_user["country_flag"] or "🌍"
@@ -506,9 +524,12 @@ def format_partner_found_message(partner_user, viewer_id):
     msg += "\n💬 Enjoy chat!"
     return msg
 
+# ==================== MATCH USERS - FIXED OPPOSITE GENDER ====================
 def match_users():
+    """Match users with FIXED opposite gender logic"""
     global waiting_random, waiting_opposite, active_pairs
 
+    # PRIORITY 1: OPPOSITE GENDER MATCHING
     with queue_lock:
         opposite_copy = waiting_opposite.copy()
 
@@ -523,19 +544,43 @@ def match_users():
 
         opposite_gender = "Male" if searcher_gender == "Female" else "Female"
         match_index = None
+        match_queue = None
 
+        # CHECK RANDOM QUEUE FIRST
         with queue_lock:
             for j, other_uid in enumerate(waiting_random):
                 other_data = db_get_user(other_uid)
                 if other_data and other_data['gender'] == opposite_gender:
                     match_index = j
+                    match_queue = "random"
                     break
 
-        if match_index is not None:
+        # IF NOT FOUND, CHECK OPPOSITE QUEUE
+        if match_index is None:
             with queue_lock:
-                if match_index < len(waiting_random):
-                    found_uid = waiting_random.pop(match_index)
-                    waiting_opposite = [(u, g) for u, g in waiting_opposite if u != uid]
+                for j, (other_uid, other_gender) in enumerate(waiting_opposite):
+                    if uid == other_uid:
+                        continue
+                    other_data = db_get_user(other_uid)
+                    if other_data and other_data['gender'] == opposite_gender:
+                        match_index = j
+                        match_queue = "opposite"
+                        break
+
+        # PERFORM MATCH
+        if match_index is not None and match_queue:
+            with queue_lock:
+                try:
+                    if match_queue == "random" and match_index < len(waiting_random):
+                        found_uid = waiting_random.pop(match_index)
+                        waiting_opposite = [(u, g) for u, g in waiting_opposite if u != uid]
+
+                    elif match_queue == "opposite" and match_index < len(waiting_opposite):
+                        found_uid, _ = waiting_opposite.pop(match_index)
+                        waiting_opposite = [(u, g) for u, g in waiting_opposite if u != uid]
+                    else:
+                        i += 1
+                        continue
 
                     with active_pairs_lock:
                         active_pairs[uid] = found_uid
@@ -547,13 +592,17 @@ def match_users():
                     try:
                         bot.send_message(uid, format_partner_found_message(u_found, uid), reply_markup=chat_keyboard())
                         bot.send_message(found_uid, format_partner_found_message(u_searcher, found_uid), reply_markup=chat_keyboard())
-                        logger.info(f"✅ Opposite: {uid} <-> {found_uid}")
-                    except:
-                        pass
+                        logger.info(f"✅ Opposite matched: {uid} ({u_searcher['gender']}) <-> {found_uid} ({u_found['gender']}) from {match_queue} queue")
+                    except Exception as e:
+                        logger.error(f"Message error: {e}")
                     return
+                except Exception as e:
+                    logger.error(f"Match error: {e}")
+                    i += 1
         else:
             i += 1
 
+    # PRIORITY 2: RANDOM WITH RANDOM
     with queue_lock:
         random_copy = waiting_random.copy()
 
@@ -575,15 +624,16 @@ def match_users():
             try:
                 bot.send_message(u1, format_partner_found_message(u2_data, u1), reply_markup=chat_keyboard())
                 bot.send_message(u2, format_partner_found_message(u1_data, u2), reply_markup=chat_keyboard())
-                logger.info(f"✅ Random: {u1} <-> {u2}")
-            except:
-                pass
+                logger.info(f"✅ Random matched: {u1} <-> {u2}")
+            except Exception as e:
+                logger.error(f"Message error: {e}")
 
         with queue_lock:
             random_copy = waiting_random.copy()
 
 # ==================== CLEANUP THREADS ====================
 def cleanup_threads():
+    """Cleanup old chat history"""
     def run():
         while True:
             time.sleep(3600)
@@ -607,6 +657,7 @@ def cleanup_threads():
                             del chat_history_with_time[uid]
                     except:
                         pass
+                logger.info(f"🧹 Cleanup: Removed {len(to_delete)} old records")
             except:
                 pass
 
@@ -614,6 +665,7 @@ def cleanup_threads():
     t.start()
 
 # ==================== COMMANDS ====================
+
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     user = message.from_user
@@ -706,7 +758,7 @@ def cmd_rules(message):
    🚨 3 warnings = 24 hour ban
    🚫 7+ reports = 7 days auto-ban
 
-Report abusive users via /report"""
+Report abusive users!"""
 
     bot.send_message(uid, rules_text, reply_markup=main_keyboard(uid))
 
@@ -771,13 +823,12 @@ def process_new_age(message):
     db_set_age(uid, age)
     pending_age.discard(uid)
 
-    # ✅ CHECK: First time setup OR settings change
     u = db_get_user(uid)
-    if not u["country"]:  # First time - auto-prompt country
+    if not u["country"]:
         bot.send_message(uid, f"✅ Age: {age} 🎂\n\n🌍 Now enter your country:")
         pending_country.add(uid)
         bot.register_next_step_handler(message, process_new_country)
-    else:  # Settings change - just show main menu
+    else:
         bot.send_message(uid, f"✅ Age: {age} 🎂", reply_markup=main_keyboard(uid))
 
 def process_new_country(message):
@@ -1008,6 +1059,21 @@ def process_report_reason(message):
     db_ban_user(partner_id, hours=TEMP_BAN_HOURS, reason=report_type)
     bot.send_message(uid, "✅ Report submitted!")
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("fb:"))
+def callback_feedback(call):
+    uid = call.from_user.id
+    _, fb_type = call.data.split(":")
+
+    fb_map = {
+        "good": "👍 Marked as good talk",
+        "rude": "👎 Reported as rude",
+        "boring": "💤 Marked as boring",
+        "fake": "🎭 Reported as fake profile"
+    }
+
+    bot.answer_callback_query(call.id, fb_map.get(fb_type, "Thanks!"), show_alert=False)
+    logger.info(f"📊 Feedback: {uid} → {fb_type}")
+
 @bot.message_handler(commands=['pradd'])
 def cmd_pradd(message):
     if message.from_user.id != ADMIN_ID:
@@ -1063,6 +1129,8 @@ def cmd_unban(message):
         conn.execute("DELETE FROM bans WHERE user_id=?", (target_id,))
         conn.commit()
     bot.reply_to(message, f"✅ User {target_id} unbanned")
+
+# ==================== MEDIA HANDLERS ====================
 
 @bot.message_handler(content_types=['photo', 'document', 'video', 'animation', 'sticker', 'voice', 'audio'])
 def handle_media(m):
@@ -1228,6 +1296,7 @@ def reject_media_cb(call):
         logger.error(f"Error: {e}")
 
 # ==================== BUTTON HANDLERS ====================
+
 @bot.message_handler(func=lambda message: message.text == "🔀 Search Random")
 def handle_search_random_btn(message):
     cmd_search_random(message)
@@ -1277,6 +1346,7 @@ def handle_next_btn(message):
     cmd_next(message)
 
 # ==================== TEXT MESSAGE HANDLER ====================
+
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
     uid = message.from_user.id
@@ -1317,18 +1387,20 @@ def handle_text(message):
         logger.error(f"Error: {e}")
 
 # ==================== RUN BOT ====================
+
 def run_bot():
-    logger.info("🤖 Starting...")
+    logger.info("🤖 GhostTalk v3.9 Starting...")
     init_db()
     cleanup_threads()
-    logger.info("✅ Ready")
+    logger.info("✅ Bot Ready!")
     bot.infinity_polling()
 
 if __name__ == "__main__":
     import sys
 
     def run_flask():
-        app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)), debug=False)
+        port = int(os.getenv("PORT", 10000))
+        app.run(host="0.0.0.0", port=port, debug=False)
 
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
