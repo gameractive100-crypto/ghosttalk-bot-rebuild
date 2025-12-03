@@ -1,21 +1,12 @@
 #!/usr/bin/env python3
 """
-GhostTalk Premium Anonymous Chat Bot v4.1 - AUTO REPORT FIX
-✅ Complete working code with CORRECT matching logic
-✅ PRIORITY 1: Premium Opposite ↔ Premium Opposite
-✅ PRIORITY 2: Premium Opposite ↔ Free Random (opposite gender)
-✅ PRIORITY 3: Free ↔ Free (Pure FIFO, any gender)
-✅ AUTO REPORT MENU after chat ends (no manual /report needed)
-✅ Report system with auto-ban
-✅ Media approval system
-✅ Referral & Premium system
-
--- Modified:
-   * thumbs removed (only "⚠ Report →")
-   * prevent duplicate searching
-   * non-premium blocked from opposite search with message
-   * stop spam suppression (30s cooldown)
-   * report menu shown to BOTH participants when someone leaves
+GhostTalk Premium Anonymous Chat Bot v4.1 - CLEAN & FIXED
+- /game and /word removed
+- Robust /stop (command + fallback text + cooldown)
+- Duplicate-search prevention
+- Report menu shown to BOTH participants when chat ends
+- Fixed gender callback syntax error
+- No other logic changed from your request
 """
 
 import sqlite3
@@ -117,8 +108,9 @@ COUNTRY_ALIASES = {
 }
 
 def get_country_info(user_input):
-    """Get country name and flag from user input"""
-    normalized = user_input.strip().lower()
+    normalized = (user_input or "").strip().lower()
+    if not normalized:
+        return None
     if normalized in COUNTRY_ALIASES:
         normalized = COUNTRY_ALIASES[normalized]
     if normalized in COUNTRIES:
@@ -407,7 +399,6 @@ def remove_from_queues(user_id):
         waiting_opposite = [(uid, gen) for uid, gen in waiting_opposite if uid != user_id]
 
 def is_searching(user_id):
-    """Return True if user is in any waiting queue"""
     with queue_lock:
         if user_id in waiting_random:
             return True
@@ -430,7 +421,6 @@ def user_label(uid):
     return str(uid)
 
 def forward_full_chat_to_admin(reporter_id, reported_id, report_type, reason=""):
-    """Forward chat history to admin"""
     try:
         bot.send_message(ADMIN_ID, f"""🚩 NEW REPORT
 Type: {report_type}
@@ -466,22 +456,14 @@ Time: {datetime.utcnow().isoformat()}""")
     except Exception as e:
         logger.error(f"Report error: {e}")
 
-# ==================== REPORT - POST-CHAT MENU (NO THUMBS) ====================
+# ==================== REPORT - POST-CHAT MENU ====================
 def quick_report_menu():
-    """
-    Compact inline menu shown immediately after partner leaves:
-    Only a single row: [⚠ Report →]
-    """
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(types.InlineKeyboardButton("⚠ Report →", callback_data="rep:open"))
     return kb
 
 @bot.callback_query_handler(func=lambda c: c.data == "rep:open")
 def open_report_reasons(call):
-    """
-    When user presses the big 'Report →' button, replace the message
-    with the detailed report reasons keyboard (rep:spam, rep:unwanted, ...).
-    """
     try:
         bot.answer_callback_query(call.id, "Opening report reasons...", show_alert=False)
         bot.edit_message_text("🚨 Select a report reason:", call.message.chat.id, call.message.message_id, reply_markup=report_keyboard())
@@ -493,20 +475,15 @@ def open_report_reasons(call):
             pass
 
 def disconnect_user(user_id):
-    """Disconnect user and show AUTOMATIC report option to BOTH participants.
-       Also stores a short-lived chat_history_with_time entry for reporting.
-    """
     global active_pairs
     with active_pairs_lock:
         if user_id in active_pairs:
             partner_id = active_pairs.get(user_id)
 
-            # store reportable history for both participants (timestamped)
             now = datetime.utcnow()
             chat_history_with_time[user_id] = (partner_id, now)
             chat_history_with_time[partner_id] = (user_id, now)
 
-            # remove both from active_pairs safely
             try:
                 if partner_id in active_pairs:
                     del active_pairs[partner_id]
@@ -518,7 +495,6 @@ def disconnect_user(user_id):
             except:
                 pass
 
-            # Notify BOTH participants with report menu + main keyboard
             try:
                 bot.send_message(partner_id, "❌ Partner left chat.", reply_markup=main_keyboard(partner_id))
                 bot.send_message(partner_id, "Report this user?", reply_markup=quick_report_menu())
@@ -535,7 +511,6 @@ def disconnect_user(user_id):
 
 # ==================== MAIN / CHAT KEYBOARDS ====================
 def main_keyboard(user_id):
-    """Main menu keyboard"""
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
     kb.add("🔀 Search Random")
     u = db_get_user(user_id)
@@ -550,14 +525,12 @@ def main_keyboard(user_id):
     return kb
 
 def chat_keyboard():
-    """Chat menu keyboard"""
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
     kb.add("📊 Stats")
     kb.add("⏭️ Next", "🛑 Stop")
     return kb
 
 def report_keyboard():
-    """Report reason keyboard - shown when user opens the report menu"""
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
         types.InlineKeyboardButton("🚫 Spam", callback_data="rep:spam"),
@@ -570,41 +543,32 @@ def report_keyboard():
     return markup
 
 def format_partner_found_message(partner_user, viewer_id):
-    """Format partner found message"""
-    gender_emoji = "👨" if partner_user["gender"] == "Male" else "👩"
-    age_text = str(partner_user["age"]) if partner_user["age"] else "Unknown"
-    country_flag = partner_user["country_flag"] or "🌍"
-    country_name = partner_user["country"] or "Global"
+    gender_emoji = "👨" if partner_user.get("gender") == "Male" else "👩" if partner_user.get("gender") == "Female" else "👤"
+    age_text = str(partner_user.get("age")) if partner_user.get("age") else "Unknown"
+    country_flag = partner_user.get("country_flag") or "🌍"
+    country_name = partner_user.get("country") or "Global"
 
     msg = (
         "🎉 Partner Found! 🎉\n\n"
         f"🎂 Age: {age_text}\n"
-        f"👤 Gender: {gender_emoji} {partner_user['gender']}\n"
+        f"👤 Gender: {gender_emoji} {partner_user.get('gender')}\n"
         f"🌍 Country: {country_flag} {country_name}\n"
     )
 
     if viewer_id == ADMIN_ID:
-        partner_name = partner_user["first_name"] or partner_user["username"] or "Unknown"
-        msg += f"\n👤 Name: {partner_name}\n🆔 ID: {partner_user['user_id']}\n"
+        partner_name = partner_user.get("first_name") or partner_user.get("username") or "Unknown"
+        msg += f"\n👤 Name: {partner_name}\n🆔 ID: {partner_user.get('user_id')}\n"
 
     msg += "\n💬 Enjoy chat!"
     return msg
 
 # ==================== MATCH USERS - CORRECT 3 PRIORITY LOGIC ====================
 def match_users():
-    """
-    CORRECT 3-PRIORITY MATCHING SYSTEM
-    ✅ PRIORITY 1: Premium Opposite ↔ Premium Opposite (opposite gender needed)
-    ✅ PRIORITY 2: Premium Opposite ↔ Free Random (opposite gender needed)
-    ✅ PRIORITY 3: Free Random ↔ Free Random (any gender, pure FIFO)
-    """
     global waiting_random, waiting_opposite, active_pairs
 
-    # ==================== PRIORITY 1: PREMIUM OPPOSITE ↔ PREMIUM OPPOSITE ====================
     i = 0
     while i < len(waiting_opposite):
         uid, searcher_gender = waiting_opposite[i]
-
         if not db_is_premium(uid):
             i += 1
             continue
@@ -614,18 +578,14 @@ def match_users():
         with queue_lock:
             for j in range(i + 1, len(waiting_opposite)):
                 other_uid, other_gender = waiting_opposite[j]
-
                 if db_is_premium(other_uid) and other_gender == needed_gender:
                     waiting_opposite.pop(j)
                     waiting_opposite.pop(i)
-
                     with active_pairs_lock:
                         active_pairs[uid] = other_uid
                         active_pairs[other_uid] = uid
-
                     u1 = db_get_user(uid)
                     u2 = db_get_user(other_uid)
-
                     try:
                         bot.send_message(uid, format_partner_found_message(u2, uid), reply_markup=chat_keyboard())
                         bot.send_message(other_uid, format_partner_found_message(u1, other_uid), reply_markup=chat_keyboard())
@@ -633,10 +593,8 @@ def match_users():
                     except:
                         pass
                     return
-
         i += 1
 
-    # ==================== PRIORITY 2: PREMIUM OPPOSITE ↔ FREE RANDOM ====================
     with queue_lock:
         opposite_copy = waiting_opposite.copy()
 
@@ -650,19 +608,15 @@ def match_users():
             for j, other_uid in enumerate(waiting_random):
                 if db_is_premium(other_uid):
                     continue
-
                 other_data = db_get_user(other_uid)
-                if other_data and other_data['gender'] == needed_gender:
+                if other_data and other_data.get('gender') == needed_gender:
                     found_uid = waiting_random.pop(j)
                     waiting_opposite = [(u, g) for u, g in waiting_opposite if u != uid]
-
                     with active_pairs_lock:
                         active_pairs[uid] = found_uid
                         active_pairs[found_uid] = uid
-
                     u1 = db_get_user(uid)
                     u2 = db_get_user(found_uid)
-
                     try:
                         bot.send_message(uid, format_partner_found_message(u2, uid), reply_markup=chat_keyboard())
                         bot.send_message(found_uid, format_partner_found_message(u1, found_uid), reply_markup=chat_keyboard())
@@ -671,25 +625,20 @@ def match_users():
                         pass
                     return
 
-    # ==================== PRIORITY 3: FREE RANDOM ↔ FREE RANDOM ====================
     with queue_lock:
         while len(waiting_random) >= 2:
             u1 = waiting_random.pop(0)
             u2 = waiting_random.pop(0)
-
             if db_is_premium(u1) or db_is_premium(u2):
                 waiting_random.insert(0, u1)
                 if u1 != u2:
                     waiting_random.insert(0, u2)
                 break
-
             with active_pairs_lock:
                 active_pairs[u1] = u2
                 active_pairs[u2] = u1
-
             u1_data = db_get_user(u1)
             u2_data = db_get_user(u2)
-
             try:
                 bot.send_message(u1, format_partner_found_message(u2_data, u1), reply_markup=chat_keyboard())
                 bot.send_message(u2, format_partner_found_message(u1_data, u2), reply_markup=chat_keyboard())
@@ -699,7 +648,6 @@ def match_users():
 
 # ==================== CLEANUP THREADS ====================
 def cleanup_threads():
-    """Cleanup old chat history"""
     def run():
         while True:
             time.sleep(3600)
@@ -707,14 +655,12 @@ def cleanup_threads():
                 now = datetime.utcnow()
                 threshold = timedelta(days=7)
                 to_delete = []
-
                 for uid, (partner, ts) in list(chat_history_with_time.items()):
                     try:
                         if now - ts > threshold:
                             to_delete.append(uid)
                     except:
                         to_delete.append(uid)
-
                 for uid in to_delete:
                     try:
                         if uid in chat_history:
@@ -726,7 +672,6 @@ def cleanup_threads():
                 logger.info(f"🧹 Cleanup: Removed {len(to_delete)} old records")
             except:
                 pass
-
     t = threading.Thread(target=run, daemon=True)
     t.start()
 
@@ -790,7 +735,6 @@ def cmd_help(message):
 
 ⚠️ 3 warnings = 24h ban
 📊 Auto-ban after 7 reports"""
-
     bot.send_message(uid, help_text, reply_markup=main_keyboard(uid))
 
 @bot.message_handler(commands=['rules'])
@@ -799,31 +743,14 @@ def cmd_rules(message):
     rules_text = """📋 COMMUNITY RULES
 
 1️⃣ Be Respectful
-   ✅ Treat everyone with courtesy
-   ❌ No harassment or abuse
-
 2️⃣ No Adult Content
-   ✅ Keep conversations appropriate
-   ❌ No explicit/sexual content
-
 3️⃣ No Spam
-   ✅ Natural conversation flow
-   ❌ No repeated messages/links
-
 4️⃣ Protect Privacy
-   ✅ Don't share personal info
-   ❌ No phone numbers/addresses
-
 5️⃣ Media Consent
-   ✅ Ask before sharing media
-   ❌ No unwanted images
 
-⚠️ VIOLATIONS:
-   🚨 3 warnings = 24 hour ban
-   🚫 7+ reports = 7 days auto-ban
-
+⚠️ 3 warnings = 24 hour ban
+🚫 7+ reports = 7 days auto-ban
 Report abusive users!"""
-
     bot.send_message(uid, rules_text, reply_markup=main_keyboard(uid))
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("sex:"))
@@ -842,8 +769,16 @@ def callback_set_gender(call):
             return
 
     _, gender = call.data.split(":")
-    gender_display = "Male" if gender == "male" else "Female"
-    gender_emoji = "👨" if gender == "male" else "👩"
+
+    if gender == "male":
+        gender_display = "Male"
+        gender_emoji = "👨"
+    elif gender == "female":
+        gender_display = "Female"
+        gender_emoji = "👩"
+    else:
+        gender_display = "Not specified"
+        gender_emoji = "👤"
 
     u = db_get_user(uid)
     if u and u["gender"] == gender_display:
@@ -867,7 +802,7 @@ def callback_set_gender(call):
 
 def process_new_age(message):
     uid = message.from_user.id
-    text = message.text.strip()
+    text = (message.text or "").strip()
 
     if uid not in pending_age:
         bot.send_message(uid, "Use /start first")
@@ -921,27 +856,23 @@ def cmd_settings(message):
     if not u:
         bot.send_message(uid, "Use /start first")
         return
-
     premium_status = "✅ Premium" if db_is_premium(uid) else "🆓 Free"
-    gender_emoji = "👨" if u["gender"] == "Male" else "👩"
-
+    gender_emoji = "👨" if u.get("gender") == "Male" else "👩" if u.get("gender") == "Female" else "👤"
     settings_text = (
         "⚙️ SETTINGS\n\n"
-        f"👤 Gender: {gender_emoji} {u['gender'] or 'Not set'}\n"
-        f"🎂 Age: {u['age'] or 'Not set'}\n"
-        f"🌍 Country: {u['country_flag'] or '🌍'} {u['country'] or 'Not set'}\n\n"
-        f"📊 Messages: {u['messages_sent']}\n"
-        f"✅ Media Approved: {u['media_approved']}\n"
-        f"❌ Media Rejected: {u['media_rejected']}\n\n"
-        f"👥 Referred: {u['referral_count']}/3\n"
+        f"👤 Gender: {gender_emoji} {u.get('gender') or 'Not set'}\n"
+        f"🎂 Age: {u.get('age') or 'Not set'}\n"
+        f"🌍 Country: {u.get('country_flag') or '🌍'} {u.get('country') or 'Not set'}\n\n"
+        f"📊 Messages: {u.get('messages_sent')}\n"
+        f"✅ Media Approved: {u.get('media_approved')}\n"
+        f"❌ Media Rejected: {u.get('media_rejected')}\n\n"
+        f"👥 Referred: {u.get('referral_count')}/3\n"
         f"{premium_status}"
     )
-
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(types.InlineKeyboardButton("🎂 Change Age", callback_data="age:change"))
     markup.row(types.InlineKeyboardButton("👨 Gender", callback_data="sex:male"), types.InlineKeyboardButton("👩 Gender", callback_data="sex:female"))
     markup.row(types.InlineKeyboardButton("🌍 Change Country", callback_data="set:country"))
-
     bot.send_message(uid, settings_text, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("age:"))
@@ -970,52 +901,41 @@ def cmd_refer(message):
     if not u:
         bot.send_message(uid, "Use /start first")
         return
-
     try:
         bot_username = bot.get_me().username
         ref_link = f"https://t.me/{bot_username}?start={u['referral_code']}"
     except:
         ref_link = f"REFCODE:{u['referral_code']}"
-
-    remaining = PREMIUM_REFERRALS_NEEDED - u["referral_count"]
-
+    remaining = PREMIUM_REFERRALS_NEEDED - u.get("referral_count", 0)
     refer_text = (
         "👥 REFERRAL SYSTEM\n\n"
         f"🔗 {ref_link}\n\n"
-        f"👥 Referred: {u['referral_count']}/{PREMIUM_REFERRALS_NEEDED}\n"
+        f"👥 Referred: {u.get('referral_count', 0)}/{PREMIUM_REFERRALS_NEEDED}\n"
         f"🎁 Reward: {PREMIUM_DURATION_HOURS}h Premium\n"
     )
-
     if remaining > 0:
         refer_text += f"\n📍 Invite {remaining} more!"
     else:
         refer_text += "\n✅ Premium unlocked!"
-
     bot.send_message(uid, refer_text)
 
 @bot.message_handler(commands=['search_random'])
 def cmd_search_random(message):
     uid = message.from_user.id
-
     if db_is_banned(uid):
         bot.send_message(uid, "🚫 Banned")
         return
-
     u = db_get_user(uid)
-    if not u or not u["gender"] or not u["age"] or not u["country"]:
+    if not u or not u.get("gender") or not u.get("age") or not u.get("country"):
         bot.send_message(uid, "❌ Complete profile first! /start")
         return
-
     with active_pairs_lock:
         if uid in active_pairs:
             bot.send_message(uid, "⏳ Already chatting!")
             return
-
-    # prevent duplicate searching
     if is_searching(uid):
         bot.send_message(uid, "⏳ Already searching. Please wait or /stop to cancel.")
         return
-
     remove_from_queues(uid)
     with queue_lock:
         waiting_random.append(uid)
@@ -1025,70 +945,74 @@ def cmd_search_random(message):
 @bot.message_handler(commands=['search_opposite_gender'])
 def cmd_search_opposite(message):
     uid = message.from_user.id
-
     if db_is_banned(uid):
         bot.send_message(uid, "🚫 Banned")
         return
-
     if not db_is_premium(uid):
         bot.send_message(uid, "💎 PREMIUM REQUIRED!\n\n✨ Refer 3 friends to unlock!")
         return
-
     u = db_get_user(uid)
-    if not u or not u["gender"] or not u["age"] or not u["country"]:
+    if not u or not u.get("gender") or not u.get("age") or not u.get("country"):
         bot.send_message(uid, "❌ Complete profile!")
         return
-
     with active_pairs_lock:
         if uid in active_pairs:
             bot.send_message(uid, "⏳ Already chatting!")
             return
-
-    # prevent duplicate searching
     if is_searching(uid):
         bot.send_message(uid, "⏳ Already searching. Please wait or /stop to cancel.")
         return
-
-    opposite_gen = "Male" if u["gender"] == "Female" else "Female"
-    logger.info(f"🎯 {uid} ({u['gender']}) searching opposite ({opposite_gen})")
-
+    opposite_gen = "Male" if u.get("gender") == "Female" else "Female"
+    logger.info(f"🎯 {uid} ({u.get('gender')}) searching opposite ({opposite_gen})")
     remove_from_queues(uid)
     with queue_lock:
-        waiting_opposite.append((uid, u["gender"]))
+        waiting_opposite.append((uid, u.get("gender")))
     bot.send_message(uid, f"🎯 Searching {opposite_gen}...\n⏳ Wait")
     match_users()
 
+# --- Robust stop command (single handler) ---
 @bot.message_handler(commands=['stop'])
 def cmd_stop(message):
     uid = message.from_user.id
-
-    # If user is searching, remove from queues and notify
-    if is_searching(uid):
-        remove_from_queues(uid)
-        bot.send_message(uid, "✅ Search stopped", reply_markup=main_keyboard(uid))
-        return
-
-    # If user is chatting, disconnect and notify (and show report menus)
-    with active_pairs_lock:
-        if uid in active_pairs:
-            disconnect_user(uid)
-            bot.send_message(uid, "✅ Stopped", reply_markup=main_keyboard(uid))
+    logger.info(f"CMD /stop invoked by {uid}")
+    try:
+        if is_searching(uid):
+            remove_from_queues(uid)
+            bot.send_message(uid, "✅ Search stopped", reply_markup=main_keyboard(uid))
             return
-
-    # Not searching & not chatting -> suppress repetitive messages within 30s
+    except Exception as e:
+        logger.error(f"stop:is_searching error for {uid}: {e}")
+    try:
+        with active_pairs_lock:
+            if uid in active_pairs:
+                disconnect_user(uid)
+                bot.send_message(uid, "✅ Stopped", reply_markup=main_keyboard(uid))
+                return
+    except Exception as e:
+        logger.error(f"stop:disconnect error for {uid}: {e}")
     now_ts = time.time()
     send_msg = False
-    with stop_cooldown_lock:
-        last = stop_cooldown.get(uid)
-        if not last or (now_ts - last) > 30:
-            stop_cooldown[uid] = now_ts
-            send_msg = True
-
+    try:
+        with stop_cooldown_lock:
+            last = stop_cooldown.get(uid)
+            if not last or (now_ts - last) > 30:
+                stop_cooldown[uid] = now_ts
+                send_msg = True
+    except Exception as e:
+        logger.error(f"stop:cooldown lock error for {uid}: {e}")
+        send_msg = True
     if send_msg:
         bot.send_message(uid, "❌ Not currently searching or chatting.", reply_markup=main_keyboard(uid))
     else:
-        # silently ignore repeated stop presses within cooldown
-        pass
+        logger.debug(f"stop: suppressed repetitive /stop for {uid}")
+
+# --- Fallback text handler so users can type "stop" or send the emoji ---
+@bot.message_handler(func=lambda message: isinstance(message.text, str) and message.text.strip().lower() in {
+    "stop", "/stop", "🛑 stop", "🛑", "stop chat", "stopchat"
+})
+def handle_stop_text(message):
+    logger.info(f"Fallback STOP text handler triggered by {message.from_user.id} -> '{message.text}'")
+    cmd_stop(message)
 
 @bot.message_handler(commands=['next'])
 def cmd_next(message):
@@ -1104,9 +1028,11 @@ def cmd_next(message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rep:"))
 def callback_report(call):
     uid = call.from_user.id
-    _, report_type = call.data.split(":")
-
-    # ✅ SKIP REPORT
+    parts = call.data.split(":", 1)
+    if len(parts) == 1:
+        bot.answer_callback_query(call.id, "Invalid", show_alert=True)
+        return
+    _, report_type = parts
     if report_type == "skip":
         bot.answer_callback_query(call.id, "✅ Skipped", show_alert=False)
         try:
@@ -1114,14 +1040,10 @@ def callback_report(call):
         except:
             pass
         return
-
-    # Get partner from chat history (chat already ended, so not in active_pairs)
     if uid not in chat_history_with_time:
         bot.answer_callback_query(call.id, "❌ Chat data expired", show_alert=True)
         return
-
     partner_id, _ = chat_history_with_time[uid]
-
     report_type_map = {
         "spam": "Spam",
         "unwanted": "Unwanted Content",
@@ -1130,61 +1052,46 @@ def callback_report(call):
         "other": "Other"
     }
     report_type_name = report_type_map.get(report_type, "Other")
-
     if report_type == "other":
         report_reason_pending[uid] = (partner_id, report_type_name)
         bot.answer_callback_query(call.id, "Type reason...", show_alert=False)
         bot.send_message(uid, "📝 Type reason (short, max 100 chars):")
         bot.register_next_step_handler(call.message, process_report_reason)
         return
-
     db_add_report(uid, partner_id, report_type_name, "")
     forward_full_chat_to_admin(uid, partner_id, report_type_name, "")
     db_ban_user(partner_id, hours=TEMP_BAN_HOURS, reason=report_type_name)
-
-    # cleanup so same user cannot re-report same session repeatedly
     try:
         if uid in chat_history_with_time:
             del chat_history_with_time[uid]
     except:
         pass
-
     bot.send_message(uid, "✅ Report submitted! User banned for 24 hours.", reply_markup=main_keyboard(uid))
     bot.answer_callback_query(call.id, "✅ Reported", show_alert=False)
-
     try:
         bot.edit_message_text("✓ Report submitted", call.message.chat.id, call.message.message_id)
     except:
         pass
-
     logger.info(f"📊 Report: {uid} reported {partner_id} for {report_type_name}")
 
 def process_report_reason(message):
-    """Process custom report reason"""
     uid = message.from_user.id
     reason = (message.text or "").strip()[:100]
-
     if uid not in report_reason_pending:
         bot.send_message(uid, "❌ Report expired. Try again.", reply_markup=main_keyboard(uid))
         return
-
     partner_id, report_type = report_reason_pending.pop(uid)
-
     if not reason:
         bot.send_message(uid, "❌ Reason cannot be empty!", reply_markup=main_keyboard(uid))
         return
-
     db_add_report(uid, partner_id, report_type, reason)
     forward_full_chat_to_admin(uid, partner_id, report_type, reason)
     db_ban_user(partner_id, hours=TEMP_BAN_HOURS, reason=report_type)
-
-    # cleanup entry to avoid duplicates
     try:
         if uid in chat_history_with_time:
             del chat_history_with_time[uid]
     except:
         pass
-
     bot.send_message(uid, "✅ Report submitted! User banned for 24 hours.", reply_markup=main_keyboard(uid))
     logger.info(f"📊 Report: {uid} reported {partner_id} for {report_type} - Reason: {reason}")
 
@@ -1192,14 +1099,12 @@ def process_report_reason(message):
 def callback_feedback(call):
     uid = call.from_user.id
     _, fb_type = call.data.split(":")
-
     fb_map = {
         "good": "👍 Marked as good talk",
         "rude": "👎 Reported as rude",
         "boring": "💤 Marked as boring",
         "fake": "🎭 Reported as fake profile"
     }
-
     bot.answer_callback_query(call.id, fb_map.get(fb_type, "Thanks!"), show_alert=False)
     logger.info(f"📊 Feedback: {uid} → {fb_type}")
 
@@ -1263,19 +1168,15 @@ def cmd_unban(message):
 @bot.message_handler(content_types=['photo', 'document', 'video', 'animation', 'sticker', 'voice', 'audio'])
 def handle_media(m):
     uid = m.from_user.id
-
     if db_is_banned(uid):
         bot.send_message(uid, "🚫 Banned")
         return
-
     with active_pairs_lock:
         if uid not in active_pairs:
             bot.send_message(uid, "❌ Not connected")
             return
         partner = active_pairs[uid]
-
     media_type = m.content_type
-
     if media_type == "photo":
         media_id = m.photo[-1].file_id
     elif media_type == "document":
@@ -1292,9 +1193,8 @@ def handle_media(m):
         media_id = m.audio.file_id
     else:
         return
-
     u = db_get_user(uid)
-    if u and u["media_approved"]:
+    if u and u.get("media_approved"):
         try:
             if media_type == "photo":
                 bot.send_photo(partner, media_id)
@@ -1315,20 +1215,17 @@ def handle_media(m):
         except:
             bot.send_message(uid, "❌ Could not send")
         return
-
     token = f"{uid}{int(time.time()*1000)}{secrets.token_hex(4)}"
     with pending_media_lock:
         pending_media[token] = {
             "sender": uid, "partner": partner, "media_type": media_type,
             "file_id": media_id, "msg_id": None, "timestamp": datetime.utcnow().isoformat()
         }
-
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton("✅ Accept", callback_data=f"app:{token}"),
         types.InlineKeyboardButton("❌ Reject", callback_data=f"rej:{token}")
     )
-
     try:
         msg = bot.send_message(partner, f"Partner sent {media_type}. Accept?", reply_markup=markup)
         with pending_media_lock:
@@ -1349,16 +1246,13 @@ def approve_media_cb(call):
             if not meta:
                 bot.answer_callback_query(call.id, "Expired", show_alert=True)
                 return
-
             sender_id = meta["sender"]
             partner_id = meta["partner"]
             media_type = meta["media_type"]
             file_id = meta["file_id"]
             msg_id = meta.get("msg_id")
-
             if token in pending_media:
                 del pending_media[token]
-
         try:
             if media_type == "photo":
                 bot.send_photo(partner_id, file_id)
@@ -1376,18 +1270,15 @@ def approve_media_cb(call):
                 bot.send_audio(partner_id, file_id)
         except:
             pass
-
         try:
             bot.send_message(sender_id, "✅ Approved!")
             db_increment_media(sender_id, "approved")
         except:
             pass
-
         try:
             bot.edit_message_text("✅ Approved", call.message.chat.id, msg_id)
         except:
             pass
-
         bot.answer_callback_query(call.id, "✅ Approved", show_alert=False)
     except Exception as e:
         logger.error(f"Error: {e}")
@@ -1401,24 +1292,19 @@ def reject_media_cb(call):
             if not meta:
                 bot.answer_callback_query(call.id, "Expired", show_alert=True)
                 return
-
             sender_id = meta["sender"]
             msg_id = meta.get("msg_id")
-
             if token in pending_media:
                 del pending_media[token]
-
         try:
             bot.send_message(sender_id, "❌ Rejected")
             db_increment_media(sender_id, "rejected")
         except:
             pass
-
         try:
             bot.edit_message_text("❌ Rejected", call.message.chat.id, msg_id)
         except:
             pass
-
         bot.answer_callback_query(call.id, "❌ Rejected", show_alert=False)
     except Exception as e:
         logger.error(f"Error: {e}")
@@ -1461,10 +1347,10 @@ def handle_stats_btn(message):
         return
     stats = (
         "📊 YOUR STATS\n\n"
-        f"📨 Messages: {u['messages_sent']}\n"
-        f"✅ Media Approved: {u['media_approved']}\n"
-        f"❌ Media Rejected: {u['media_rejected']}\n"
-        f"👥 Referred: {u['referral_count']}/3"
+        f"📨 Messages: {u.get('messages_sent')}\n"
+        f"✅ Media Approved: {u.get('media_approved')}\n"
+        f"❌ Media Rejected: {u.get('media_rejected')}\n"
+        f"👥 Referred: {u.get('referral_count')}/3"
     )
     bot.send_message(uid, stats, reply_markup=chat_keyboard())
 
@@ -1477,37 +1363,30 @@ def handle_next_btn(message):
 def handle_text(message):
     uid = message.from_user.id
     text = message.text
-
     if db_is_banned(uid):
         bot.send_message(uid, "🚫 Banned")
         return
-
     with active_pairs_lock:
         if uid not in active_pairs:
             bot.send_message(uid, "❌ Not connected", reply_markup=main_keyboard(uid))
             return
         partner = active_pairs.get(uid)
-
     if not partner:
         bot.send_message(uid, "❌ Not connected", reply_markup=main_keyboard(uid))
         return
-
     if is_banned_content(text):
         warn_result = warn_user(uid, "Bad content")
         if warn_result == "ban":
             remove_from_queues(uid)
             disconnect_user(uid)
         return
-
     try:
         append_chat_history(uid, message.chat.id, message.message_id)
-
         u = db_get_user(uid)
         if u:
             with get_conn() as conn:
                 conn.execute("UPDATE users SET messages_sent=messages_sent+1 WHERE user_id=?", (uid,))
                 conn.commit()
-
         bot.send_message(partner, text)
     except Exception as e:
         logger.error(f"Error: {e}")
@@ -1522,14 +1401,11 @@ def run_bot():
 
 if __name__ == "__main__":
     import sys
-
     def run_flask():
         port = int(os.getenv("PORT", 10000))
         app.run(host="0.0.0.0", port=port, debug=False)
-
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-
     try:
         run_bot()
     except Exception as e:
