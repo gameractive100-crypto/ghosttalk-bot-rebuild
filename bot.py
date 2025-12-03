@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-GhostTalk Premium Anonymous Chat Bot v4.3 - FINAL FIX
-✅ PRIORITY 3 FIXED - Random search works for everyone
-✅ FEEDBACK REMOVED - No feedback menu after chat
-✅ REPORT MENU FIXED - Only shows when you tap report
-✅ AUTO BAN SYSTEM - 7 reports = ban
-✅ Complete working code - Production ready
+GhostTalk Premium Anonymous Chat Bot v4.1 - AUTO REPORT FIX
+✅ Complete working code with CORRECT matching logic
+✅ PRIORITY 1: Premium Opposite ↔ Premium Opposite
+✅ PRIORITY 2: Premium Opposite ↔ Free Random (opposite gender)
+✅ PRIORITY 3: Free ↔ Free (Pure FIFO, any gender)
+✅ AUTO REPORT MENU after chat ends (no manual /report needed)
+✅ Report system with auto-ban
+✅ Media approval system
+✅ Referral & Premium system
+
+-- Modified: thumbs removed; only "⚠ Report →" shown after chat
 """
 
 import sqlite3
@@ -442,24 +447,70 @@ Time: {datetime.utcnow().isoformat()}""")
     except Exception as e:
         logger.error(f"Report error: {e}")
 
+# ==================== REPORT - POST-CHAT MENU (NO THUMBS) ====================
+def quick_report_menu():
+    """
+    Compact inline menu shown immediately after partner leaves:
+    Only a single row: [⚠ Report →]
+    """
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("⚠ Report →", callback_data="rep:open"))
+    return kb
+
+@bot.callback_query_handler(func=lambda c: c.data == "rep:open")
+def open_report_reasons(call):
+    """
+    When user presses the big 'Report →' button, replace the message
+    with the detailed report reasons keyboard (rep:spam, rep:unwanted, ...).
+    """
+    try:
+        bot.answer_callback_query(call.id, "Opening report reasons...", show_alert=False)
+        # replace the message with the detailed reasons menu
+        bot.edit_message_text("🚨 Select a report reason:", call.message.chat.id, call.message.message_id, reply_markup=report_keyboard())
+    except Exception as e:
+        logger.error(f"open_report_reasons error: {e}")
+        try:
+            bot.answer_callback_query(call.id, "Could not open report menu", show_alert=True)
+        except:
+            pass
+
 def disconnect_user(user_id):
-    """Disconnect user - NO FEEDBACK MENU (removed as requested)"""
+    """Disconnect user and show AUTOMATIC report option to the partner.
+       Also stores a short-lived chat_history_with_time entry for reporting.
+    """
     global active_pairs
     with active_pairs_lock:
         if user_id in active_pairs:
-            partner_id = active_pairs[user_id]
+            partner_id = active_pairs.get(user_id)
             chat_history_with_time[user_id] = (partner_id, datetime.utcnow())
             chat_history_with_time[partner_id] = (user_id, datetime.utcnow())
+
             if partner_id in active_pairs:
-                del active_pairs[partner_id]
+                try:
+                    del active_pairs[partner_id]
+                except:
+                    pass
             if user_id in active_pairs:
-                del active_pairs[user_id]
+                try:
+                    del active_pairs[user_id]
+                except:
+                    pass
+
             try:
                 bot.send_message(partner_id, "❌ Partner left chat.", reply_markup=main_keyboard(partner_id))
-                logger.info(f"👋 Disconnected: {user_id} | Partner {partner_id}")
+                # show only the big report button (no thumbs)
+                bot.send_message(partner_id, "Report this user?", reply_markup=quick_report_menu())
+
+                logger.info(f"👋 Disconnected: {user_id} | Partner {partner_id} shown report menu")
             except Exception as e:
                 logger.error(f"Disconnect error: {e}")
 
+            try:
+                bot.send_message(user_id, "You left the chat.", reply_markup=main_keyboard(user_id))
+            except:
+                pass
+
+# ==================== MAIN / CHAT KEYBOARDS ====================
 def main_keyboard(user_id):
     """Main menu keyboard"""
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
@@ -472,7 +523,7 @@ def main_keyboard(user_id):
             kb.add("Opposite Gender (Premium) 🔒")
     kb.add("🛑 Stop")
     kb.add("⚙️ Settings", "👥 Refer")
-    kb.add("❓ Help", "📋 Rules", "🚨 Report")
+    kb.add("❓ Help", "📋 Rules")
     return kb
 
 def chat_keyboard():
@@ -483,7 +534,7 @@ def chat_keyboard():
     return kb
 
 def report_keyboard():
-    """Report reason keyboard - shown when user taps Report button"""
+    """Report reason keyboard - shown when user opens the report menu"""
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
         types.InlineKeyboardButton("🚫 Spam", callback_data="rep:spam"),
@@ -491,7 +542,7 @@ def report_keyboard():
         types.InlineKeyboardButton("⚠️ Inappropriate Messages", callback_data="rep:inappropriate"),
         types.InlineKeyboardButton("🕵️ Suspicious Activity", callback_data="rep:suspicious"),
         types.InlineKeyboardButton("💬 Other Reason", callback_data="rep:other"),
-        types.InlineKeyboardButton("⏭️ Cancel", callback_data="rep:cancel")
+        types.InlineKeyboardButton("⏭️ Skip", callback_data="rep:skip")
     )
     return markup
 
@@ -516,14 +567,13 @@ def format_partner_found_message(partner_user, viewer_id):
     msg += "\n💬 Enjoy chat!"
     return msg
 
-# ==================== MATCH USERS - CORRECTED LOGIC ====================
+# ==================== MATCH USERS - CORRECT 3 PRIORITY LOGIC ====================
 def match_users():
     """
-    CORRECT 3-PRIORITY MATCHING:
-
-    ✅ PRIORITY 1: Premium Opposite ↔ Premium Opposite (opposite gender only)
-    ✅ PRIORITY 2: Premium Opposite ↔ Free Random (opposite gender only)
-    ✅ PRIORITY 3: RANDOM SEARCH - ANYONE can match ANYONE (no premium check)
+    CORRECT 3-PRIORITY MATCHING SYSTEM
+    ✅ PRIORITY 1: Premium Opposite ↔ Premium Opposite (opposite gender needed)
+    ✅ PRIORITY 2: Premium Opposite ↔ Free Random (opposite gender needed)
+    ✅ PRIORITY 3: Free Random ↔ Free Random (any gender, pure FIFO)
     """
     global waiting_random, waiting_opposite, active_pairs
 
@@ -598,12 +648,17 @@ def match_users():
                         pass
                     return
 
-    # ==================== PRIORITY 3: RANDOM SEARCH (ANY ↔ ANY) ====================
-    # ✅ FIXED: NO premium check! Anyone can match anyone in random search
+    # ==================== PRIORITY 3: FREE RANDOM ↔ FREE RANDOM ====================
     with queue_lock:
         while len(waiting_random) >= 2:
             u1 = waiting_random.pop(0)
             u2 = waiting_random.pop(0)
+
+            if db_is_premium(u1) or db_is_premium(u2):
+                waiting_random.insert(0, u1)
+                if u1 != u2:
+                    waiting_random.insert(0, u2)
+                break
 
             with active_pairs_lock:
                 active_pairs[u1] = u2
@@ -615,7 +670,7 @@ def match_users():
             try:
                 bot.send_message(u1, format_partner_found_message(u2_data, u1), reply_markup=chat_keyboard())
                 bot.send_message(u2, format_partner_found_message(u1_data, u2), reply_markup=chat_keyboard())
-                logger.info(f"✅ P3: {u1}({u1_data['gender']}) ↔ {u2}({u2_data['gender']}) [RANDOM]")
+                logger.info(f"✅ P3: {u1}({u1_data['gender']}) FREE ↔ {u2}({u2_data['gender']}) FREE")
             except:
                 pass
 
@@ -653,7 +708,6 @@ def cleanup_threads():
     t.start()
 
 # ==================== COMMANDS ====================
-
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     user = message.from_user
@@ -702,7 +756,6 @@ def cmd_help(message):
 ⚙️ Settings - Change profile
 👥 Refer - Get referral link
 📋 Rules - View community rules
-🚨 Report - Report abusive user
 🛑 Stop - Exit current chat
 
 🔗 During Chat:
@@ -990,37 +1043,26 @@ def cmd_next(message):
     bot.send_message(uid, "🔍 Looking for new partner...", reply_markup=main_keyboard(uid))
     cmd_search_random(message)
 
-@bot.message_handler(commands=['report'])
-def cmd_report(message):
-    """Report command - shows report menu"""
-    uid = message.from_user.id
-    with active_pairs_lock:
-        if uid not in active_pairs:
-            bot.send_message(uid, "❌ Not in active chat. Can only report current partner.")
-            return
-
-    bot.send_message(uid, "🚨 Select report reason:", reply_markup=report_keyboard())
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rep:"))
 def callback_report(call):
     uid = call.from_user.id
     _, report_type = call.data.split(":")
 
-    # ✅ CANCEL REPORT
-    if report_type == "cancel":
-        bot.answer_callback_query(call.id, "✅ Cancelled", show_alert=False)
+    # ✅ SKIP REPORT
+    if report_type == "skip":
+        bot.answer_callback_query(call.id, "✅ Skipped", show_alert=False)
         try:
-            bot.edit_message_text("✓ Report cancelled", call.message.chat.id, call.message.message_id)
+            bot.edit_message_text("✓ Report skipped", call.message.chat.id, call.message.message_id)
         except:
             pass
         return
 
-    # Get partner from active chat
-    with active_pairs_lock:
-        if uid not in active_pairs:
-            bot.answer_callback_query(call.id, "❌ Not in active chat", show_alert=True)
-            return
-        partner_id = active_pairs[uid]
+    # Get partner from chat history (chat already ended, so not in active_pairs)
+    if uid not in chat_history_with_time:
+        bot.answer_callback_query(call.id, "❌ Chat data expired", show_alert=True)
+        return
+
+    partner_id, _ = chat_history_with_time[uid]
 
     report_type_map = {
         "spam": "Spam",
@@ -1041,6 +1083,13 @@ def callback_report(call):
     db_add_report(uid, partner_id, report_type_name, "")
     forward_full_chat_to_admin(uid, partner_id, report_type_name, "")
     db_ban_user(partner_id, hours=TEMP_BAN_HOURS, reason=report_type_name)
+
+    # cleanup so same user cannot re-report same session repeatedly
+    try:
+        if uid in chat_history_with_time:
+            del chat_history_with_time[uid]
+    except:
+        pass
 
     bot.send_message(uid, "✅ Report submitted! User banned for 24 hours.", reply_markup=main_keyboard(uid))
     bot.answer_callback_query(call.id, "✅ Reported", show_alert=False)
@@ -1073,6 +1122,21 @@ def process_report_reason(message):
 
     bot.send_message(uid, "✅ Report submitted! User banned for 24 hours.", reply_markup=main_keyboard(uid))
     logger.info(f"📊 Report: {uid} reported {partner_id} for {report_type} - Reason: {reason}")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("fb:"))
+def callback_feedback(call):
+    uid = call.from_user.id
+    _, fb_type = call.data.split(":")
+
+    fb_map = {
+        "good": "👍 Marked as good talk",
+        "rude": "👎 Reported as rude",
+        "boring": "💤 Marked as boring",
+        "fake": "🎭 Reported as fake profile"
+    }
+
+    bot.answer_callback_query(call.id, fb_map.get(fb_type, "Thanks!"), show_alert=False)
+    logger.info(f"📊 Feedback: {uid} → {fb_type}")
 
 @bot.message_handler(commands=['pradd'])
 def cmd_pradd(message):
@@ -1131,7 +1195,6 @@ def cmd_unban(message):
     bot.reply_to(message, f"✅ User {target_id} unbanned")
 
 # ==================== MEDIA HANDLERS ====================
-
 @bot.message_handler(content_types=['photo', 'document', 'video', 'animation', 'sticker', 'voice', 'audio'])
 def handle_media(m):
     uid = m.from_user.id
@@ -1296,7 +1359,6 @@ def reject_media_cb(call):
         logger.error(f"Error: {e}")
 
 # ==================== BUTTON HANDLERS ====================
-
 @bot.message_handler(func=lambda message: message.text == "🔀 Search Random")
 def handle_search_random_btn(message):
     cmd_search_random(message)
@@ -1325,10 +1387,6 @@ def handle_help_btn(message):
 def handle_rules_btn(message):
     cmd_rules(message)
 
-@bot.message_handler(func=lambda message: message.text == "🚨 Report")
-def handle_report_btn(message):
-    cmd_report(message)
-
 @bot.message_handler(func=lambda message: message.text == "📊 Stats")
 def handle_stats_btn(message):
     uid = message.from_user.id
@@ -1350,7 +1408,6 @@ def handle_next_btn(message):
     cmd_next(message)
 
 # ==================== TEXT MESSAGE HANDLER ====================
-
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
     uid = message.from_user.id
@@ -1391,9 +1448,8 @@ def handle_text(message):
         logger.error(f"Error: {e}")
 
 # ==================== RUN BOT ====================
-
 def run_bot():
-    logger.info("🤖 GhostTalk v4.3 Starting...")
+    logger.info("🤖 GhostTalk v4.1 Starting...")
     init_db()
     cleanup_threads()
     logger.info("✅ Bot Ready!")
