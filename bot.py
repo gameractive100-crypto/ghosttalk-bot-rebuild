@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-GhostTalk Premium Anonymous Chat Bot v3.9
+GhostTalk Premium Anonymous Chat Bot v3.9 - FIXED VERSION
 ✅ Complete working code with all features
-✅ Opposite gender matching FIXED
+✅ Opposite gender matching FIXED (3-PRIORITY SYSTEM)
 ✅ Report system with auto-ban
 ✅ Media approval system
 ✅ Referral & Premium system
+✅ SYMMETRIC for Male & Female users
 """
 
 import sqlite3
@@ -524,12 +525,19 @@ def format_partner_found_message(partner_user, viewer_id):
     msg += "\n💬 Enjoy chat!"
     return msg
 
-# ==================== MATCH USERS - FIXED OPPOSITE GENDER ====================
+# ==================== MATCH USERS - 3 PRIORITY SYSTEM (FIXED VERSION) ====================
 def match_users():
-    """Match users with FIXED opposite gender logic"""
+    """
+    Match users with 3-PRIORITY system (SYMMETRIC for Male AND Female):
+
+    PRIORITY 1: Premium Opposite ↔ Premium Opposite (best for premium)
+    PRIORITY 2: Premium Opposite ↔ Free Random (same gender) (premium gets demand, free gets lucky)
+    PRIORITY 3: Free Random ↔ Free Random (probability-based)
+    """
     global waiting_random, waiting_opposite, active_pairs
 
-    # PRIORITY 1: OPPOSITE GENDER MATCHING
+    # ========== PRIORITY 1: PREMIUM OPPOSITE ↔ PREMIUM OPPOSITE ==========
+    # SYMMETRIC: Works for both Male and Female premium users
     with queue_lock:
         opposite_copy = waiting_opposite.copy()
 
@@ -542,45 +550,35 @@ def match_users():
                 i += 1
                 continue
 
+        # Check if THIS user is premium
+        if not db_is_premium(uid):
+            i += 1
+            continue
+
         opposite_gender = "Male" if searcher_gender == "Female" else "Female"
         match_index = None
-        match_queue = None
 
-        # CHECK RANDOM QUEUE FIRST
+        # ONLY look in waiting_opposite for premium users
         with queue_lock:
-            for j, other_uid in enumerate(waiting_random):
+            for j, (other_uid, other_gender) in enumerate(waiting_opposite):
+                if uid == other_uid:
+                    continue
+
+                # Check if OTHER user is also PREMIUM
+                if not db_is_premium(other_uid):
+                    continue
+
                 other_data = db_get_user(other_uid)
                 if other_data and other_data['gender'] == opposite_gender:
                     match_index = j
-                    match_queue = "random"
                     break
 
-        # IF NOT FOUND, CHECK OPPOSITE QUEUE
-        if match_index is None:
-            with queue_lock:
-                for j, (other_uid, other_gender) in enumerate(waiting_opposite):
-                    if uid == other_uid:
-                        continue
-                    other_data = db_get_user(other_uid)
-                    if other_data and other_data['gender'] == opposite_gender:
-                        match_index = j
-                        match_queue = "opposite"
-                        break
-
-        # PERFORM MATCH
-        if match_index is not None and match_queue:
+        # PERFORM PRIORITY 1 MATCH
+        if match_index is not None:
             with queue_lock:
                 try:
-                    if match_queue == "random" and match_index < len(waiting_random):
-                        found_uid = waiting_random.pop(match_index)
-                        waiting_opposite = [(u, g) for u, g in waiting_opposite if u != uid]
-
-                    elif match_queue == "opposite" and match_index < len(waiting_opposite):
-                        found_uid, _ = waiting_opposite.pop(match_index)
-                        waiting_opposite = [(u, g) for u, g in waiting_opposite if u != uid]
-                    else:
-                        i += 1
-                        continue
+                    found_uid, _ = waiting_opposite.pop(match_index)
+                    waiting_opposite = [(u, g) for u, g in waiting_opposite if u != uid]
 
                     with active_pairs_lock:
                         active_pairs[uid] = found_uid
@@ -592,7 +590,7 @@ def match_users():
                     try:
                         bot.send_message(uid, format_partner_found_message(u_found, uid), reply_markup=chat_keyboard())
                         bot.send_message(found_uid, format_partner_found_message(u_searcher, found_uid), reply_markup=chat_keyboard())
-                        logger.info(f"✅ Opposite matched: {uid} ({u_searcher['gender']}) <-> {found_uid} ({u_found['gender']}) from {match_queue} queue")
+                        logger.info(f"✅ PRIORITY 1 (PREMIUM↔PREMIUM): {uid} (PREMIUM {u_searcher['gender']}) ↔ {found_uid} (PREMIUM {u_found['gender']})")
                     except Exception as e:
                         logger.error(f"Message error: {e}")
                     return
@@ -602,7 +600,74 @@ def match_users():
         else:
             i += 1
 
-    # PRIORITY 2: RANDOM WITH RANDOM
+    # ========== PRIORITY 2: PREMIUM OPPOSITE ↔ FREE RANDOM ==========
+    # SYMMETRIC: Works for both Male and Female premium users searching opposite
+    with queue_lock:
+        opposite_copy = waiting_opposite.copy()
+
+    i = 0
+    while i < len(opposite_copy):
+        uid, searcher_gender = opposite_copy[i]
+
+        with queue_lock:
+            if uid not in waiting_opposite:
+                i += 1
+                continue
+
+        # Check if THIS user is premium
+        if not db_is_premium(uid):
+            i += 1
+            continue
+
+        opposite_gender = "Male" if searcher_gender == "Female" else "Female"
+        match_index = None
+
+        # Look in waiting_random for FREE user with opposite gender
+        # This ensures:
+        # - Premium Male gets Free Female from random queue
+        # - Premium Female gets Free Male from random queue
+        with queue_lock:
+            for j, other_uid in enumerate(waiting_random):
+                other_data = db_get_user(other_uid)
+
+                # Check if OTHER user is FREE (not premium)
+                if db_is_premium(other_uid):
+                    continue
+
+                if other_data and other_data['gender'] == opposite_gender:
+                    match_index = j
+                    break
+
+        # PERFORM PRIORITY 2 MATCH
+        if match_index is not None:
+            with queue_lock:
+                try:
+                    found_uid = waiting_random.pop(match_index)
+                    waiting_opposite = [(u, g) for u, g in waiting_opposite if u != uid]
+
+                    with active_pairs_lock:
+                        active_pairs[uid] = found_uid
+                        active_pairs[found_uid] = uid
+
+                    u_searcher = db_get_user(uid)
+                    u_found = db_get_user(found_uid)
+
+                    try:
+                        bot.send_message(uid, format_partner_found_message(u_found, uid), reply_markup=chat_keyboard())
+                        bot.send_message(found_uid, format_partner_found_message(u_searcher, found_uid), reply_markup=chat_keyboard())
+                        logger.info(f"✅ PRIORITY 2 (PREMIUM↔FREE): {uid} (PREMIUM {u_searcher['gender']}) ↔ {found_uid} (FREE {u_found['gender']})")
+                    except Exception as e:
+                        logger.error(f"Message error: {e}")
+                    return
+                except Exception as e:
+                    logger.error(f"Match error: {e}")
+                    i += 1
+        else:
+            i += 1
+
+    # ========== PRIORITY 3: FREE RANDOM ↔ FREE RANDOM ==========
+    # Both users tapped random (no gender preference)
+    # Probability-based matching - PURE FIFO, NO BIAS
     with queue_lock:
         random_copy = waiting_random.copy()
 
@@ -611,8 +676,16 @@ def match_users():
             if len(waiting_random) < 2:
                 break
 
-            u1 = waiting_random.pop(0)
-            u2 = waiting_random.pop(0)
+            u1 = waiting_random.pop(0)      # Take first user (ANY gender)
+            u2 = waiting_random.pop(0)      # Take second user (ANY gender)
+
+            # Verify both are FREE (extra safety check)
+            if db_is_premium(u1) or db_is_premium(u2):
+                # Put them back if premium (shouldn't happen but safety check)
+                waiting_random.insert(0, u1)
+                if u1 != u2:
+                    waiting_random.insert(0, u2)
+                break
 
             with active_pairs_lock:
                 active_pairs[u1] = u2
@@ -624,7 +697,7 @@ def match_users():
             try:
                 bot.send_message(u1, format_partner_found_message(u2_data, u1), reply_markup=chat_keyboard())
                 bot.send_message(u2, format_partner_found_message(u1_data, u2), reply_markup=chat_keyboard())
-                logger.info(f"✅ Random matched: {u1} <-> {u2}")
+                logger.info(f"✅ PRIORITY 3 (FREE↔FREE): {u1} ({u1_data['gender']}) ↔ {u2} ({u2_data['gender']})")
             except Exception as e:
                 logger.error(f"Message error: {e}")
 
