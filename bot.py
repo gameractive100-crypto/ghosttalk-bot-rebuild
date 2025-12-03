@@ -450,6 +450,7 @@ def disconnect_user(user_id):
                 del active_pairs[user_id]
             try:
                 bot.send_message(partner_id, "❌ Partner left chat.", reply_markup=main_keyboard(partner_id))
+                bot.send_message(partner_id, "🚨 Report?", reply_markup=report_keyboard())
             except:
                 pass
 
@@ -1142,6 +1143,9 @@ def approve_media_cb(call):
             file_id = meta["file_id"]
             msg_id = meta.get("msg_id")
 
+            if token in pending_media:
+                del pending_media[token]
+
         try:
             if media_type == "photo":
                 bot.send_photo(partner_id, file_id)
@@ -1163,13 +1167,9 @@ def approve_media_cb(call):
             pass
 
         try:
-            bot.edit_message_reply_markup(call.message.chat.id, msg_id, reply_markup=None)
+            bot.edit_message_text("✅ Approved", call.message.chat.id, msg_id)
         except:
             pass
-
-        with pending_media_lock:
-            if token in pending_media:
-                del pending_media[token]
 
         bot.answer_callback_query(call.id, "✅ Approved", show_alert=False)
     except Exception as e:
@@ -1188,6 +1188,9 @@ def reject_media_cb(call):
             sender_id = meta["sender"]
             msg_id = meta.get("msg_id")
 
+            if token in pending_media:
+                del pending_media[token]
+
         try:
             bot.send_message(sender_id, "❌ Rejected")
             db_increment_media(sender_id, "rejected")
@@ -1195,13 +1198,9 @@ def reject_media_cb(call):
             pass
 
         try:
-            bot.edit_message_reply_markup(call.message.chat.id, msg_id, reply_markup=None)
+            bot.edit_message_text("❌ Rejected", call.message.chat.id, msg_id)
         except:
             pass
-
-        with pending_media_lock:
-            if token in pending_media:
-                del pending_media[token]
 
         bot.answer_callback_query(call.id, "❌ Rejected", show_alert=False)
     except Exception as e:
