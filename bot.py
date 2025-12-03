@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-GhostTalk Premium Bot - v3.2 FINAL FIXES
-✅ Sticker message delete fixed
-✅ Report menu only on /report command
-✅ Report with reason forwarded to admin
-✅ Settings: Gender=PREMIUM, Age=FREE, Country=FREE
+GhostTalk Premium Bot - v3.3 FINAL COMPLETE
+✅ Sticker message properly deleted after accept/reject
+✅ Report menu ONLY on /report command
+✅ Auto-ban = 7 days (not immediate)
+✅ /help and /rules commands added
+✅ No report menu on disconnect
+✅ Proper logic throughout
 """
 
 import sqlite3
@@ -32,6 +34,8 @@ DB_PATH = os.getenv("DB_PATH", "ghosttalk.db")
 
 WARNING_LIMIT = 3
 TEMP_BAN_HOURS = 24
+AUTO_BAN_REPORTS = 7  # Ban after 7 reports (not 10)
+AUTO_BAN_DAYS = 7     # 7 days ban
 PREMIUM_REFERRALS_NEEDED = 3
 PREMIUM_DURATION_HOURS = 24
 
@@ -138,7 +142,6 @@ pending_media = {}
 chat_history_with_time = {}
 pending_country = set()
 pending_age = set()
-pending_gender = set()
 report_reason_pending = {}
 chat_history = {}
 
@@ -310,15 +313,16 @@ def db_add_report(reporter_id, reported_id, report_type, reason):
 
         logger.info(f"📊 User {reported_id} has {report_count} reports")
 
-        if report_count >= 10:
+        if report_count >= AUTO_BAN_REPORTS:
+            ban_until = (datetime.utcnow() + timedelta(days=AUTO_BAN_DAYS)).isoformat()
             conn.execute(
                 "INSERT OR REPLACE INTO bans (user_id, ban_until, permanent, reason, banned_by, banned_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (reported_id, None, 1, f"Auto-ban: {report_count} reports", ADMIN_ID, datetime.utcnow().isoformat())
+                (reported_id, ban_until, 0, f"Auto-ban: {report_count} reports", ADMIN_ID, datetime.utcnow().isoformat())
             )
-            logger.warning(f"🚫 AUTO-BAN: User {reported_id} - {report_count} reports")
+            logger.warning(f"🚫 AUTO-BAN: User {reported_id} for {AUTO_BAN_DAYS} days - {report_count} reports")
 
             try:
-                bot.send_message(reported_id, f"🚫 PERMANENTLY AUTO-BANNED\n❌ Reason: {report_count} reports")
+                bot.send_message(reported_id, f"🚫 BANNED FOR {AUTO_BAN_DAYS} DAYS\n❌ Reason: {report_count} reports received")
             except:
                 pass
 
@@ -399,7 +403,6 @@ def user_label(uid):
 def forward_full_chat_to_admin(reporter_id, reported_id, report_type, reason=""):
     """🚩 REPORT SYSTEM WITH REASON"""
     try:
-        # 🚩 Header
         bot.send_message(ADMIN_ID, f"""🚩 NEW REPORT
 Type: {report_type}
 Reporter: {user_label(reporter_id)} ({reporter_id})
@@ -407,7 +410,6 @@ Reported: {user_label(reported_id)} ({reported_id})
 Reason: {reason if reason else "No reason"}
 Time: {datetime.utcnow().isoformat()}""")
 
-        # 📨 Reporter messages
         bot.send_message(ADMIN_ID, "📨 Reporter messages:")
         reporter_msgs = chat_history.get(reporter_id, [])[-20:]
         if reporter_msgs:
@@ -419,7 +421,6 @@ Time: {datetime.utcnow().isoformat()}""")
         else:
             bot.send_message(ADMIN_ID, "— No messages —")
 
-        # 📨 Reported user messages
         bot.send_message(ADMIN_ID, "📨 Reported user messages:")
         reported_msgs = chat_history.get(reported_id, [])[-20:]
         if reported_msgs:
@@ -463,13 +464,13 @@ def main_keyboard(user_id):
             kb.add("Opposite Gender (Premium) 🔒")
     kb.add("🛑 Stop")
     kb.add("⚙️ Settings", "👥 Refer")
+    kb.add("❓ Help", "📋 Rules")
     return kb
 
 def chat_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
     kb.add("📊 Stats")
-    kb.add("🚨 Report", "⏭️ Next")
-    kb.add("🛑 Stop")
+    kb.add("⏭️ Next", "🛑 Stop")
     return kb
 
 def report_keyboard():
@@ -500,7 +501,7 @@ def format_partner_found_message(partner_user, viewer_id):
         partner_name = partner_user["first_name"] or partner_user["username"] or "Unknown"
         msg += f"\n👤 Name: {partner_name}\n🆔 ID: {partner_user['user_id']}\n"
 
-    msg += "\n💬 Enjoy chat! Type /next for new partner."
+    msg += "\n💬 Enjoy chat!"
     return msg
 
 def match_users():
@@ -647,6 +648,65 @@ def cmd_start(message):
             "🎯 Ready to chat?"
         )
         bot.send_message(user.id, welcome_msg, reply_markup=main_keyboard(user.id))
+
+@bot.message_handler(commands=['help'])
+def cmd_help(message):
+    uid = message.from_user.id
+    help_text = """❓ GHOSTTALK HELP
+
+🔀 Search Random - Find any random partner
+🎯 Search Opposite Gender - Find opposite gender (PREMIUM)
+📊 Stats - View your stats
+⚙️ Settings - Change profile
+👥 Refer - Get referral link
+📋 Rules - View community rules
+🛑 Stop - Exit current chat
+
+🔗 During Chat:
+🚨 Report - Report abusive user
+⏭️ Next - Find new partner
+
+📱 Share photos/videos with permission system
+✅ Accept - Allow partner's media
+❌ Reject - Decline partner's media
+
+⚠️ 3 warnings = 24h ban
+📊 Auto-ban after 7 reports"""
+
+    bot.send_message(uid, help_text, reply_markup=main_keyboard(uid))
+
+@bot.message_handler(commands=['rules'])
+def cmd_rules(message):
+    uid = message.from_user.id
+    rules_text = """📋 COMMUNITY RULES
+
+1️⃣ Be Respectful
+   ✅ Treat everyone with courtesy
+   ❌ No harassment or abuse
+
+2️⃣ No Adult Content
+   ✅ Keep conversations appropriate
+   ❌ No explicit/sexual content
+
+3️⃣ No Spam
+   ✅ Natural conversation flow
+   ❌ No repeated messages/links
+
+4️⃣ Protect Privacy
+   ✅ Don't share personal info
+   ❌ No phone numbers/addresses
+
+5️⃣ Media Consent
+   ✅ Ask before sharing media
+   ❌ No unwanted images
+
+⚠️ VIOLATIONS:
+   🚨 3 warnings = 24 hour ban
+   🚫 7+ reports = 7 days auto-ban
+
+Report abusive users via /report"""
+
+    bot.send_message(uid, rules_text, reply_markup=main_keyboard(uid))
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("sex:"))
 def callback_set_gender(call):
@@ -916,7 +976,6 @@ def callback_report(call):
         bot.register_next_step_handler(call.message, process_report_reason)
         return
 
-    # Immediate report without reason
     db_add_report(uid, partner_id, report_type_name, "")
     forward_full_chat_to_admin(uid, partner_id, report_type_name, "")
     db_ban_user(partner_id, hours=TEMP_BAN_HOURS, reason=report_type_name)
@@ -936,7 +995,7 @@ def process_report_reason(message):
     db_add_report(uid, partner_id, report_type, reason)
     forward_full_chat_to_admin(uid, partner_id, report_type, reason)
     db_ban_user(partner_id, hours=TEMP_BAN_HOURS, reason=report_type)
-    bot.send_message(uid, "✅ Report submitted with reason!")
+    bot.send_message(uid, "✅ Report submitted!")
 
 @bot.message_handler(commands=['pradd'])
 def cmd_pradd(message):
@@ -1169,6 +1228,14 @@ def handle_settings_btn(message):
 def handle_refer_btn(message):
     cmd_refer(message)
 
+@bot.message_handler(func=lambda message: message.text == "❓ Help")
+def handle_help_btn(message):
+    cmd_help(message)
+
+@bot.message_handler(func=lambda message: message.text == "📋 Rules")
+def handle_rules_btn(message):
+    cmd_rules(message)
+
 @bot.message_handler(func=lambda message: message.text == "📊 Stats")
 def handle_stats_btn(message):
     uid = message.from_user.id
@@ -1188,10 +1255,6 @@ def handle_stats_btn(message):
 @bot.message_handler(func=lambda message: message.text == "⏭️ Next")
 def handle_next_btn(message):
     cmd_next(message)
-
-@bot.message_handler(func=lambda message: message.text == "🚨 Report")
-def handle_report_btn(message):
-    cmd_report(message)
 
 # ==================== TEXT MESSAGE HANDLER ====================
 @bot.message_handler(func=lambda message: True)
