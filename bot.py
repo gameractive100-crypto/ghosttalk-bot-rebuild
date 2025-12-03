@@ -10,7 +10,12 @@ GhostTalk Premium Anonymous Chat Bot v4.1 - AUTO REPORT FIX
 ✅ Media approval system
 ✅ Referral & Premium system
 
--- Modified: thumbs removed; only "⚠ Report →" shown after chat
+-- Modified:
+   * thumbs removed (only "⚠ Report →")
+   * prevent duplicate searching
+   * non-premium blocked from opposite search with message
+   * stop spam suppression (30s cooldown)
+   * report menu shown to BOTH participants when someone leaves
 """
 
 import sqlite3
@@ -154,6 +159,10 @@ pending_country = set()
 pending_age = set()
 report_reason_pending = {}
 chat_history = {}
+
+# stop cooldown data to prevent spammy "not in chat" replies
+stop_cooldown = {}  # user_id -> timestamp
+stop_cooldown_lock = threading.Lock()
 
 # ==================== THREADING LOCKS ====================
 queue_lock = threading.Lock()
@@ -397,6 +406,16 @@ def remove_from_queues(user_id):
             waiting_random.remove(user_id)
         waiting_opposite = [(uid, gen) for uid, gen in waiting_opposite if uid != user_id]
 
+def is_searching(user_id):
+    """Return True if user is in any waiting queue"""
+    with queue_lock:
+        if user_id in waiting_random:
+            return True
+        for uid, _ in waiting_opposite:
+            if uid == user_id:
+                return True
+    return False
+
 def append_chat_history(user_id, chat_id, message_id):
     if user_id not in chat_history:
         chat_history[user_id] = []
@@ -465,7 +484,6 @@ def open_report_reasons(call):
     """
     try:
         bot.answer_callback_query(call.id, "Opening report reasons...", show_alert=False)
-        # replace the message with the detailed reasons menu
         bot.edit_message_text("🚨 Select a report reason:", call.message.chat.id, call.message.message_id, reply_markup=report_keyboard())
     except Exception as e:
         logger.error(f"open_report_reasons error: {e}")
@@ -475,40 +493,45 @@ def open_report_reasons(call):
             pass
 
 def disconnect_user(user_id):
-    """Disconnect user and show AUTOMATIC report option to the partner.
+    """Disconnect user and show AUTOMATIC report option to BOTH participants.
        Also stores a short-lived chat_history_with_time entry for reporting.
     """
     global active_pairs
     with active_pairs_lock:
         if user_id in active_pairs:
             partner_id = active_pairs.get(user_id)
-            chat_history_with_time[user_id] = (partner_id, datetime.utcnow())
-            chat_history_with_time[partner_id] = (user_id, datetime.utcnow())
 
-            if partner_id in active_pairs:
-                try:
+            # store reportable history for both participants (timestamped)
+            now = datetime.utcnow()
+            chat_history_with_time[user_id] = (partner_id, now)
+            chat_history_with_time[partner_id] = (user_id, now)
+
+            # remove both from active_pairs safely
+            try:
+                if partner_id in active_pairs:
                     del active_pairs[partner_id]
-                except:
-                    pass
-            if user_id in active_pairs:
-                try:
-                    del active_pairs[user_id]
-                except:
-                    pass
-
-            try:
-                bot.send_message(partner_id, "❌ Partner left chat.", reply_markup=main_keyboard(partner_id))
-                # show only the big report button (no thumbs)
-                bot.send_message(partner_id, "Report this user?", reply_markup=quick_report_menu())
-
-                logger.info(f"👋 Disconnected: {user_id} | Partner {partner_id} shown report menu")
-            except Exception as e:
-                logger.error(f"Disconnect error: {e}")
-
-            try:
-                bot.send_message(user_id, "You left the chat.", reply_markup=main_keyboard(user_id))
             except:
                 pass
+            try:
+                if user_id in active_pairs:
+                    del active_pairs[user_id]
+            except:
+                pass
+
+            # Notify BOTH participants with report menu + main keyboard
+            try:
+                bot.send_message(partner_id, "❌ Partner left chat.", reply_markup=main_keyboard(partner_id))
+                bot.send_message(partner_id, "Report this user?", reply_markup=quick_report_menu())
+            except Exception as e:
+                logger.error(f"Disconnect notify partner error: {e}")
+
+            try:
+                bot.send_message(user_id, "❌ You left the chat.", reply_markup=main_keyboard(user_id))
+                bot.send_message(user_id, "Report this user?", reply_markup=quick_report_menu())
+            except Exception as e:
+                logger.error(f"Disconnect notify leaver error: {e}")
+
+            logger.info(f"👋 Disconnected: {user_id} | Partner {partner_id} shown report menu")
 
 # ==================== MAIN / CHAT KEYBOARDS ====================
 def main_keyboard(user_id):
@@ -988,6 +1011,11 @@ def cmd_search_random(message):
             bot.send_message(uid, "⏳ Already chatting!")
             return
 
+    # prevent duplicate searching
+    if is_searching(uid):
+        bot.send_message(uid, "⏳ Already searching. Please wait or /stop to cancel.")
+        return
+
     remove_from_queues(uid)
     with queue_lock:
         waiting_random.append(uid)
@@ -1016,6 +1044,11 @@ def cmd_search_opposite(message):
             bot.send_message(uid, "⏳ Already chatting!")
             return
 
+    # prevent duplicate searching
+    if is_searching(uid):
+        bot.send_message(uid, "⏳ Already searching. Please wait or /stop to cancel.")
+        return
+
     opposite_gen = "Male" if u["gender"] == "Female" else "Female"
     logger.info(f"🎯 {uid} ({u['gender']}) searching opposite ({opposite_gen})")
 
@@ -1028,9 +1061,34 @@ def cmd_search_opposite(message):
 @bot.message_handler(commands=['stop'])
 def cmd_stop(message):
     uid = message.from_user.id
-    remove_from_queues(uid)
-    disconnect_user(uid)
-    bot.send_message(uid, "✅ Stopped", reply_markup=main_keyboard(uid))
+
+    # If user is searching, remove from queues and notify
+    if is_searching(uid):
+        remove_from_queues(uid)
+        bot.send_message(uid, "✅ Search stopped", reply_markup=main_keyboard(uid))
+        return
+
+    # If user is chatting, disconnect and notify (and show report menus)
+    with active_pairs_lock:
+        if uid in active_pairs:
+            disconnect_user(uid)
+            bot.send_message(uid, "✅ Stopped", reply_markup=main_keyboard(uid))
+            return
+
+    # Not searching & not chatting -> suppress repetitive messages within 30s
+    now_ts = time.time()
+    send_msg = False
+    with stop_cooldown_lock:
+        last = stop_cooldown.get(uid)
+        if not last or (now_ts - last) > 30:
+            stop_cooldown[uid] = now_ts
+            send_msg = True
+
+    if send_msg:
+        bot.send_message(uid, "❌ Not currently searching or chatting.", reply_markup=main_keyboard(uid))
+    else:
+        # silently ignore repeated stop presses within cooldown
+        pass
 
 @bot.message_handler(commands=['next'])
 def cmd_next(message):
@@ -1119,6 +1177,13 @@ def process_report_reason(message):
     db_add_report(uid, partner_id, report_type, reason)
     forward_full_chat_to_admin(uid, partner_id, report_type, reason)
     db_ban_user(partner_id, hours=TEMP_BAN_HOURS, reason=report_type)
+
+    # cleanup entry to avoid duplicates
+    try:
+        if uid in chat_history_with_time:
+            del chat_history_with_time[uid]
+    except:
+        pass
 
     bot.send_message(uid, "✅ Report submitted! User banned for 24 hours.", reply_markup=main_keyboard(uid))
     logger.info(f"📊 Report: {uid} reported {partner_id} for {report_type} - Reason: {reason}")
