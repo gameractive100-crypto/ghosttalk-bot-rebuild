@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 """
 GhostTalk Premium Bot - v3.3 FINAL COMPLETE
 ✅ Sticker message properly deleted after accept/reject
@@ -450,7 +450,6 @@ def disconnect_user(user_id):
                 del active_pairs[user_id]
             try:
                 bot.send_message(partner_id, "❌ Partner left chat.", reply_markup=main_keyboard(partner_id))
-                bot.send_message(partner_id, "🚨 Report?", reply_markup=report_keyboard())
             except:
                 pass
 
@@ -769,9 +768,7 @@ def process_new_age(message):
 
     db_set_age(uid, age)
     pending_age.discard(uid)
-    bot.send_message(uid, f"✅ Age: {age} 🎂\n\n🌍 Now enter your country:")
-    pending_country.add(uid)
-    bot.register_next_step_handler(message, process_new_country)
+    bot.send_message(uid, f"✅ Age: {age} 🎂", reply_markup=main_keyboard(uid))
 
 def process_new_country(message):
     uid = message.from_user.id
@@ -1120,7 +1117,6 @@ def handle_media(m):
         with pending_media_lock:
             if token in pending_media:
                 pending_media[token]["msg_id"] = msg.message_id
-        bot.send_message(uid, "📤 Waiting for approval...")
     except:
         bot.send_message(uid, "❌ Error")
         with pending_media_lock:
