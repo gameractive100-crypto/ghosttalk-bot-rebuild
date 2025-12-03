@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-GhostTalk Premium Anonymous Chat Bot v4.0 - FINAL CORRECT VERSION
+GhostTalk Premium Anonymous Chat Bot v4.1 - AUTO REPORT FIX
 ✅ Complete working code with CORRECT matching logic
 ✅ PRIORITY 1: Premium Opposite ↔ Premium Opposite
 ✅ PRIORITY 2: Premium Opposite ↔ Free Random (opposite gender)
 ✅ PRIORITY 3: Free ↔ Free (Pure FIFO, any gender)
+✅ AUTO REPORT MENU after chat ends (no manual /report needed)
 ✅ Report system with auto-ban
 ✅ Media approval system
 ✅ Referral & Premium system
@@ -445,7 +446,7 @@ Time: {datetime.utcnow().isoformat()}""")
         logger.error(f"Report error: {e}")
 
 def disconnect_user(user_id):
-    """Disconnect user and show report/feedback options"""
+    """Disconnect user and show AUTOMATIC report/feedback options"""
     global active_pairs
     with active_pairs_lock:
         if user_id in active_pairs:
@@ -458,7 +459,9 @@ def disconnect_user(user_id):
                 del active_pairs[user_id]
             try:
                 bot.send_message(partner_id, "❌ Partner left chat.", reply_markup=main_keyboard(partner_id))
-                bot.send_message(partner_id, "🚨 Report partner?", reply_markup=report_keyboard())
+
+                # ✅ AUTOMATIC REPORT MENU
+                bot.send_message(partner_id, "🚨 Want to report this user?", reply_markup=report_keyboard())
 
                 feedback_markup = types.InlineKeyboardMarkup(row_width=1)
                 feedback_markup.add(
@@ -468,8 +471,9 @@ def disconnect_user(user_id):
                     types.InlineKeyboardButton("🎭 Fake profile", callback_data="fb:fake")
                 )
                 bot.send_message(partner_id, "📝 Feedback (optional):", reply_markup=feedback_markup)
-            except:
-                pass
+                logger.info(f"👋 Disconnected: {user_id} | Partner {partner_id} shown report menu")
+            except Exception as e:
+                logger.error(f"Disconnect error: {e}")
 
 def main_keyboard(user_id):
     """Main menu keyboard"""
@@ -494,14 +498,15 @@ def chat_keyboard():
     return kb
 
 def report_keyboard():
-    """Report reason keyboard"""
+    """Report reason keyboard - shown automatically after chat ends"""
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
         types.InlineKeyboardButton("🚫 Spam", callback_data="rep:spam"),
         types.InlineKeyboardButton("📎 Unwanted Content", callback_data="rep:unwanted"),
         types.InlineKeyboardButton("⚠️ Inappropriate Messages", callback_data="rep:inappropriate"),
         types.InlineKeyboardButton("🕵️ Suspicious Activity", callback_data="rep:suspicious"),
-        types.InlineKeyboardButton("Other", callback_data="rep:other")
+        types.InlineKeyboardButton("💬 Other Reason", callback_data="rep:other"),
+        types.InlineKeyboardButton("⏭️ Skip", callback_data="rep:skip")
     )
     return markup
 
@@ -537,27 +542,21 @@ def match_users():
     global waiting_random, waiting_opposite, active_pairs
 
     # ==================== PRIORITY 1: PREMIUM OPPOSITE ↔ PREMIUM OPPOSITE ====================
-    # Both looking for opposite gender in waiting_opposite queue
     i = 0
     while i < len(waiting_opposite):
         uid, searcher_gender = waiting_opposite[i]
 
-        # Only if THIS user is PREMIUM
         if not db_is_premium(uid):
             i += 1
             continue
 
-        # ✅ CORRECT: What gender does THIS user NEED?
         needed_gender = "Male" if searcher_gender == "Female" else "Female"
 
-        # Look for PREMIUM + OPPOSITE gender in waiting_opposite
         with queue_lock:
             for j in range(i + 1, len(waiting_opposite)):
                 other_uid, other_gender = waiting_opposite[j]
 
-                # Check: PREMIUM + gender that THIS user needs?
                 if db_is_premium(other_uid) and other_gender == needed_gender:
-                    # ✅ MATCH FOUND!
                     waiting_opposite.pop(j)
                     waiting_opposite.pop(i)
 
@@ -579,29 +578,22 @@ def match_users():
         i += 1
 
     # ==================== PRIORITY 2: PREMIUM OPPOSITE ↔ FREE RANDOM ====================
-    # Premium user looking for opposite gender in free random queue
     with queue_lock:
         opposite_copy = waiting_opposite.copy()
 
     for uid, searcher_gender in opposite_copy:
-        # Only PREMIUM users
         if not db_is_premium(uid):
             continue
 
-        # ✅ CORRECT: What gender does THIS user NEED?
         needed_gender = "Male" if searcher_gender == "Female" else "Female"
 
-        # Look in waiting_random for FREE user with NEEDED gender
         with queue_lock:
             for j, other_uid in enumerate(waiting_random):
-                # Skip if premium
                 if db_is_premium(other_uid):
                     continue
 
                 other_data = db_get_user(other_uid)
-                # ✅ Match if FREE user has the NEEDED gender!
                 if other_data and other_data['gender'] == needed_gender:
-                    # ✅ MATCH!
                     found_uid = waiting_random.pop(j)
                     waiting_opposite = [(u, g) for u, g in waiting_opposite if u != uid]
 
@@ -621,13 +613,11 @@ def match_users():
                     return
 
     # ==================== PRIORITY 3: FREE RANDOM ↔ FREE RANDOM ====================
-    # Pure FIFO - no gender preference, match first 2 free users
     with queue_lock:
         while len(waiting_random) >= 2:
             u1 = waiting_random.pop(0)
             u2 = waiting_random.pop(0)
 
-            # Safety check - verify they're not premium
             if db_is_premium(u1) or db_is_premium(u2):
                 waiting_random.insert(0, u1)
                 if u1 != u2:
@@ -734,7 +724,6 @@ def cmd_help(message):
 🛑 Stop - Exit current chat
 
 🔗 During Chat:
-🚨 Report - Report abusive user
 ⏭️ Next - Find new partner
 
 📱 Share photos/videos with permission system
@@ -1019,26 +1008,27 @@ def cmd_next(message):
     bot.send_message(uid, "🔍 Looking for new partner...", reply_markup=main_keyboard(uid))
     cmd_search_random(message)
 
-@bot.message_handler(commands=['report'])
-def cmd_report(message):
-    uid = message.from_user.id
-    with active_pairs_lock:
-        if uid not in active_pairs:
-            bot.send_message(uid, "❌ No active partner")
-            return
-    bot.send_message(uid, "⚠️ What type?", reply_markup=report_keyboard())
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rep:"))
 def callback_report(call):
     uid = call.from_user.id
-    with active_pairs_lock:
-        partner_id = active_pairs.get(uid)
+    _, report_type = call.data.split(":")
 
-    if not partner_id:
-        bot.answer_callback_query(call.id, "No active partner", show_alert=True)
+    # ✅ SKIP REPORT
+    if report_type == "skip":
+        bot.answer_callback_query(call.id, "✅ Skipped", show_alert=False)
+        try:
+            bot.edit_message_text("✓ Report skipped", call.message.chat.id, call.message.message_id)
+        except:
+            pass
         return
 
-    _, report_type = call.data.split(":")
+    # Get partner from chat history (chat already ended, so not in active_pairs)
+    if uid not in chat_history_with_time:
+        bot.answer_callback_query(call.id, "❌ Chat data expired", show_alert=True)
+        return
+
+    partner_id, _ = chat_history_with_time[uid]
+
     report_type_map = {
         "spam": "Spam",
         "unwanted": "Unwanted Content",
@@ -1050,31 +1040,46 @@ def callback_report(call):
 
     if report_type == "other":
         report_reason_pending[uid] = (partner_id, report_type_name)
-        bot.answer_callback_query(call.id, "Type reason", show_alert=True)
-        bot.send_message(uid, "📝 Type reason (short):")
+        bot.answer_callback_query(call.id, "Type reason...", show_alert=False)
+        bot.send_message(uid, "📝 Type reason (short, max 100 chars):")
         bot.register_next_step_handler(call.message, process_report_reason)
         return
 
     db_add_report(uid, partner_id, report_type_name, "")
     forward_full_chat_to_admin(uid, partner_id, report_type_name, "")
     db_ban_user(partner_id, hours=TEMP_BAN_HOURS, reason=report_type_name)
-    bot.send_message(uid, "✅ Report submitted!")
+
+    bot.send_message(uid, "✅ Report submitted! User banned for 24 hours.", reply_markup=main_keyboard(uid))
     bot.answer_callback_query(call.id, "✅ Reported", show_alert=False)
 
+    try:
+        bot.edit_message_text("✓ Report submitted", call.message.chat.id, call.message.message_id)
+    except:
+        pass
+
+    logger.info(f"📊 Report: {uid} reported {partner_id} for {report_type_name}")
+
 def process_report_reason(message):
+    """Process custom report reason"""
     uid = message.from_user.id
-    reason = message.text.strip()
+    reason = (message.text or "").strip()[:100]
 
     if uid not in report_reason_pending:
-        bot.send_message(uid, "Report expired. Try again.")
+        bot.send_message(uid, "❌ Report expired. Try again.", reply_markup=main_keyboard(uid))
         return
 
     partner_id, report_type = report_reason_pending.pop(uid)
 
+    if not reason:
+        bot.send_message(uid, "❌ Reason cannot be empty!", reply_markup=main_keyboard(uid))
+        return
+
     db_add_report(uid, partner_id, report_type, reason)
     forward_full_chat_to_admin(uid, partner_id, report_type, reason)
     db_ban_user(partner_id, hours=TEMP_BAN_HOURS, reason=report_type)
-    bot.send_message(uid, "✅ Report submitted!")
+
+    bot.send_message(uid, "✅ Report submitted! User banned for 24 hours.", reply_markup=main_keyboard(uid))
+    logger.info(f"📊 Report: {uid} reported {partner_id} for {report_type} - Reason: {reason}")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("fb:"))
 def callback_feedback(call):
@@ -1406,7 +1411,7 @@ def handle_text(message):
 # ==================== RUN BOT ====================
 
 def run_bot():
-    logger.info("🤖 GhostTalk v4.0 Starting...")
+    logger.info("🤖 GhostTalk v4.1 Starting...")
     init_db()
     cleanup_threads()
     logger.info("✅ Bot Ready!")
