@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-GhostTalk v4.4 - DISCONNECT + RECONNECT
-- Fixed disconnect_user() - No more bot freeze
-- Partner ALWAYS gets notification
-- Added /reconnect + 🔌 Reconnect button
-  • 5 minute window after last disconnect
-  • Partner gets Accept / Reject
-  • Blocks if partner already chatting
+GhostTalk Premium Anonymous Chat Bot v4.1 - CLEAN & FIXED
+- /game and /word removed
+- Robust /stop (command + fallback text + cooldown)
+- Duplicate-search prevention
+- Report menu shown to BOTH participants when chat ends
+- Fixed gender callback syntax error
+- No other logic changed from your request
 """
 
 import sqlite3
@@ -39,11 +39,6 @@ AUTO_BAN_DAYS = 7
 PREMIUM_REFERRALS_NEEDED = 3
 PREMIUM_DURATION_HOURS = 24
 
-# Reconnect constants
-RECONNECT_WINDOW_MINUTES = 5          # 5 minute window after disconnect
-RECONNECT_TIMEOUT = 5 * 60            # 5 minutes in seconds for inline request
-RECONNECT_COOLDOWN_HOURS = 24         # 24h cooldown after successful reconnect
-
 # ==================== BANNED WORDS ====================
 BANNED_WORDS = [
     "fuck", "fucking", "sex chat", "nudes", "pussy", "dick", "cock", "penis",
@@ -53,7 +48,7 @@ BANNED_WORDS = [
     "maderchod", "mc", "bhen ka lauda", "bhenkalauda", "randi", "randika", "gand",
     "bsdk", "chut", "chot", "chuut", "choot", "lund"
 ]
-LINK_PATTERN = re.compile(r'https?://|www.', re.IGNORECASE)
+LINK_PATTERN = re.compile(r'https?://|www\.', re.IGNORECASE)
 BANNED_PATTERNS = [re.compile(rf'\b{re.escape(w)}\b', re.IGNORECASE) for w in BANNED_WORDS]
 
 # ==================== COUNTRIES (195) ====================
@@ -147,7 +142,7 @@ def health():
 
 # ==================== RUNTIME DATA ====================
 waiting_random = []
-waiting_premium_opposite = []
+waiting_opposite = []
 active_pairs = {}
 user_warnings = {}
 pending_media = {}
@@ -157,10 +152,9 @@ pending_age = set()
 report_reason_pending = {}
 chat_history = {}
 
-# reconnect runtime (in‑memory)
-reconnect_requests = {}      # requester_id -> (partner_id, request_time)
-reconnect_cooldown = {}      # user_id -> iso time until cooldown ends
-reconnect_lock = threading.Lock()
+# stop cooldown data to prevent spammy "not in chat" replies
+stop_cooldown = {}  # user_id -> timestamp
+stop_cooldown_lock = threading.Lock()
 
 # ==================== THREADING LOCKS ====================
 queue_lock = threading.Lock()
@@ -196,14 +190,6 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             reporter_id INTEGER, reported_id INTEGER,
             report_type TEXT, reason TEXT, timestamp TEXT
-        )""")
-
-        # recent partners for reconnect
-        conn.execute("""CREATE TABLE IF NOT EXISTS recent_partners (
-            user_id INTEGER PRIMARY KEY,
-            partner_id INTEGER,
-            last_disconnect TEXT,
-            reconnect_until TEXT
         )""")
 
         conn.commit()
@@ -347,8 +333,7 @@ def db_add_report(reporter_id, reported_id, report_type, reason):
             logger.warning(f"🚫 AUTO-BAN: User {reported_id} for {AUTO_BAN_DAYS} days - {report_count} reports")
 
             try:
-                bot.send_message(reported_id, f"🚫 BANNED FOR {AUTO_BAN_DAYS} DAYS
-❌ Reason: {report_count} reports received")
+                bot.send_message(reported_id, f"🚫 BANNED FOR {AUTO_BAN_DAYS} DAYS\n❌ Reason: {report_count} reports received")
             except:
                 pass
 
@@ -360,41 +345,6 @@ def db_add_report(reporter_id, reported_id, report_type, reason):
                     if reported_id in active_pairs:
                         del active_pairs[reported_id]
 
-        conn.commit()
-
-def db_save_recent_partner(user_id, partner_id):
-    """Save last partner for reconnect window."""
-    with get_conn() as conn:
-        now = datetime.utcnow()
-        reconnect_until = now + timedelta(minutes=RECONNECT_WINDOW_MINUTES)
-        conn.execute("""
-            INSERT OR REPLACE INTO recent_partners (user_id, partner_id, last_disconnect, reconnect_until)
-            VALUES (?, ?, ?, ?)
-        """, (user_id, partner_id, now.isoformat(), reconnect_until.isoformat()))
-        conn.commit()
-
-def db_get_recent_partner(user_id):
-    """Return partner_id if reconnect window still valid, else None and clean row."""
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT partner_id, reconnect_until FROM recent_partners WHERE user_id=?",
-            (user_id,)
-        ).fetchone()
-        if not row:
-            return None
-        partner_id, reconnect_until = row
-        try:
-            if datetime.fromisoformat(reconnect_until) > datetime.utcnow():
-                return partner_id
-        except:
-            pass
-        conn.execute("DELETE FROM recent_partners WHERE user_id=?", (user_id,))
-        conn.commit()
-        return None
-
-def db_clear_recent_partner(user_id):
-    with get_conn() as conn:
-        conn.execute("DELETE FROM recent_partners WHERE user_id=?", (user_id,))
         conn.commit()
 
 def db_increment_media(user_id, stat_type):
@@ -427,8 +377,7 @@ def warn_user(user_id, reason):
             if user_id in user_warnings:
                 del user_warnings[user_id]
         try:
-            bot.send_message(user_id, f"🚫 BANNED for {TEMP_BAN_HOURS} hours!
-❌ Reason: {reason}")
+            bot.send_message(user_id, f"🚫 BANNED for {TEMP_BAN_HOURS} hours!\n❌ Reason: {reason}")
         except:
             pass
         remove_from_queues(user_id)
@@ -436,27 +385,26 @@ def warn_user(user_id, reason):
         return "ban"
     else:
         try:
-            bot.send_message(user_id, f"⚠️ WARNING {count}/{WARNING_LIMIT}
-❌ {reason}
-📍 {WARNING_LIMIT - count} more = BAN!")
+            bot.send_message(user_id, f"⚠️ WARNING {count}/{WARNING_LIMIT}\n❌ {reason}\n📍 {WARNING_LIMIT - count} more = BAN!")
         except:
             pass
         return "warn"
 
 # ==================== QUEUE HELPERS ====================
 def remove_from_queues(user_id):
-    global waiting_random, waiting_premium_opposite
+    global waiting_random, waiting_opposite
     with queue_lock:
         if user_id in waiting_random:
             waiting_random.remove(user_id)
-        waiting_premium_opposite = [uid for uid in waiting_premium_opposite if uid != user_id]
+        waiting_opposite = [(uid, gen) for uid, gen in waiting_opposite if uid != user_id]
 
 def is_searching(user_id):
     with queue_lock:
         if user_id in waiting_random:
             return True
-        if user_id in waiting_premium_opposite:
-            return True
+        for uid, _ in waiting_opposite:
+            if uid == user_id:
+                return True
     return False
 
 def append_chat_history(user_id, chat_id, message_id):
@@ -508,10 +456,78 @@ Time: {datetime.utcnow().isoformat()}""")
     except Exception as e:
         logger.error(f"Report error: {e}")
 
-# ==================== REPORT MENU ====================
+# ==================== REPORT - POST-CHAT MENU ====================
 def quick_report_menu():
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(types.InlineKeyboardButton("⚠ Report →", callback_data="rep:open"))
+    return kb
+
+@bot.callback_query_handler(func=lambda c: c.data == "rep:open")
+def open_report_reasons(call):
+    try:
+        bot.answer_callback_query(call.id, "Opening report reasons...", show_alert=False)
+        bot.edit_message_text("🚨 Select a report reason:", call.message.chat.id, call.message.message_id, reply_markup=report_keyboard())
+    except Exception as e:
+        logger.error(f"open_report_reasons error: {e}")
+        try:
+            bot.answer_callback_query(call.id, "Could not open report menu", show_alert=True)
+        except:
+            pass
+
+def disconnect_user(user_id):
+    global active_pairs
+    with active_pairs_lock:
+        if user_id in active_pairs:
+            partner_id = active_pairs.get(user_id)
+
+            now = datetime.utcnow()
+            chat_history_with_time[user_id] = (partner_id, now)
+            chat_history_with_time[partner_id] = (user_id, now)
+
+            try:
+                if partner_id in active_pairs:
+                    del active_pairs[partner_id]
+            except:
+                pass
+            try:
+                if user_id in active_pairs:
+                    del active_pairs[user_id]
+            except:
+                pass
+
+            try:
+                bot.send_message(partner_id, "❌ Partner left chat.", reply_markup=main_keyboard(partner_id))
+                bot.send_message(partner_id, "Report this user?", reply_markup=quick_report_menu())
+            except Exception as e:
+                logger.error(f"Disconnect notify partner error: {e}")
+
+            try:
+                bot.send_message(user_id, "❌ You left the chat.", reply_markup=main_keyboard(user_id))
+                bot.send_message(user_id, "Report this user?", reply_markup=quick_report_menu())
+            except Exception as e:
+                logger.error(f"Disconnect notify leaver error: {e}")
+
+            logger.info(f"👋 Disconnected: {user_id} | Partner {partner_id} shown report menu")
+
+# ==================== MAIN / CHAT KEYBOARDS ====================
+def main_keyboard(user_id):
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
+    kb.add("🔀 Search Random")
+    u = db_get_user(user_id)
+    if u and u["gender"]:
+        if db_is_premium(user_id):
+            kb.add("🎯 Search Opposite Gender")
+        else:
+            kb.add("Opposite Gender (Premium) 🔒")
+    kb.add("🛑 Stop")
+    kb.add("⚙️ Settings", "👥 Refer")
+    kb.add("❓ Help", "📋 Rules")
+    return kb
+
+def chat_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
+    kb.add("📊 Stats")
+    kb.add("⏭️ Next", "🛑 Stop")
     return kb
 
 def report_keyboard():
@@ -526,129 +542,6 @@ def report_keyboard():
     )
     return markup
 
-@bot.callback_query_handler(func=lambda c: c.data == "rep:open")
-def open_report_reasons(call):
-    try:
-        bot.answer_callback_query(call.id, "Opening report reasons...", show_alert=False)
-        bot.edit_message_text("🚨 Select a report reason:", call.message.chat.id, call.message.message_id, reply_markup=report_keyboard())
-    except Exception as e:
-        logger.error(f"open_report_reasons error: {e}")
-        try:
-            bot.answer_callback_query(call.id, "Could not open report menu", show_alert=True)
-        except:
-            pass
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("rep:"))
-def handle_report(call):
-    uid = call.from_user.id
-    data = call.data.split(":")[1]
-    
-    if data == "skip":
-        bot.answer_callback_query(call.id, "Report skipped")
-        try:
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-        except:
-            pass
-        return
-    
-    try:
-        with active_pairs_lock:
-            if uid in active_pairs:
-                reported_id = active_pairs[uid]
-                
-                reason_map = {
-                    "spam": "Spam",
-                    "unwanted": "Unwanted Content",
-                    "inappropriate": "Inappropriate Messages",
-                    "suspicious": "Suspicious Activity",
-                    "other": "Other"
-                }
-                
-                report_reason = reason_map.get(data, data)
-                db_add_report(uid, reported_id, report_reason, "")
-                
-                bot.answer_callback_query(call.id, "✅ Report sent to admin", show_alert=False)
-                logger.info(f"📊 Report: {uid} reported {reported_id} for {report_reason}")
-            else:
-                bot.answer_callback_query(call.id, "Not in active chat", show_alert=True)
-    except Exception as e:
-        logger.error(f"Report handler error: {e}")
-        bot.answer_callback_query(call.id, "Error processing report", show_alert=True)
-
-# ==================== DISCONNECT FUNCTION - FIXED + SAVE PARTNER ====================
-def disconnect_user(user_id):
-    """
-    - Save partner for reconnect window
-    - Then clean active_pairs and notify both
-    """
-    global active_pairs
-    
-    partner_id = None
-    
-    # Step 1: SAFELY extract partner_id
-    with active_pairs_lock:
-        if user_id in active_pairs:
-            partner_id = active_pairs[user_id]
-            
-            # Step 2: DELETE from active_pairs
-            try:
-                del active_pairs[user_id]
-            except:
-                pass
-            
-            try:
-                if partner_id in active_pairs:
-                    del active_pairs[partner_id]
-            except:
-                pass
-    
-    # Step 3: NOW send messages (partner_id is already extracted)
-    if partner_id:
-        now = datetime.utcnow()
-        chat_history_with_time[user_id] = (partner_id, now)
-        chat_history_with_time[partner_id] = (user_id, now)
-
-        # save both directions for reconnect
-        db_save_recent_partner(user_id, partner_id)
-        db_save_recent_partner(partner_id, user_id)
-        
-        # Send to partner (ALWAYS)
-        try:
-            bot.send_message(partner_id, "❌ Partner left chat.", reply_markup=main_keyboard(partner_id))
-            bot.send_message(partner_id, "Report this user?", reply_markup=quick_report_menu())
-            logger.info(f"👋 {user_id} left. Partner {partner_id} notified ✅")
-        except Exception as e:
-            logger.error(f"❌ Failed to notify partner {partner_id}: {e}")
-        
-        # Send to leaver
-        try:
-            bot.send_message(user_id, "❌ You left the chat.", reply_markup=main_keyboard(user_id))
-            logger.info(f"👋 {user_id} acknowledged disconnect ✅")
-        except Exception as e:
-            logger.error(f"❌ Failed to notify leaver {user_id}: {e}")
-
-# ==================== KEYBOARDS ====================
-def main_keyboard(user_id):
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
-    kb.add("🔀 Search Random")
-    u = db_get_user(user_id)
-    if u and u["gender"]:
-        if db_is_premium(user_id):
-            kb.add("🎯 Search Opposite Gender")
-        else:
-            kb.add("Opposite Gender (Premium) 🔒")
-    kb.add("🔌 Reconnect")
-    kb.add("🛑 Stop")
-    kb.add("⚙️ Settings", "👥 Refer")
-    kb.add("❓ Help", "📋 Rules")
-    return kb
-
-def chat_keyboard():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
-    kb.add("📊 Stats")
-    kb.add("⏭️ Next", "🛑 Stop")
-    return kb
-
 def format_partner_found_message(partner_user, viewer_id):
     gender_emoji = "👨" if partner_user.get("gender") == "Male" else "👩" if partner_user.get("gender") == "Female" else "👤"
     age_text = str(partner_user.get("age")) if partner_user.get("age") else "Unknown"
@@ -656,119 +549,104 @@ def format_partner_found_message(partner_user, viewer_id):
     country_name = partner_user.get("country") or "Global"
 
     msg = (
-        "🎉 Partner Found! 🎉
-
-"
-        f"🎂 Age: {age_text}
-"
-        f"👤 Gender: {gender_emoji} {partner_user.get('gender')}
-"
-        f"🌍 Country: {country_flag} {country_name}
-"
+        "🎉 Partner Found! 🎉\n\n"
+        f"🎂 Age: {age_text}\n"
+        f"👤 Gender: {gender_emoji} {partner_user.get('gender')}\n"
+        f"🌍 Country: {country_flag} {country_name}\n"
     )
 
     if viewer_id == ADMIN_ID:
         partner_name = partner_user.get("first_name") or partner_user.get("username") or "Unknown"
-        msg += f"
-👤 Name: {partner_name}
-🆔 ID: {partner_user.get('user_id')}
-"
+        msg += f"\n👤 Name: {partner_name}\n🆔 ID: {partner_user.get('user_id')}\n"
 
-    msg += "
-💬 Enjoy chat!"
+    msg += "\n💬 Enjoy chat!"
     return msg
 
-# ==================== FAIR MATCHING LOGIC ====================
+# ==================== MATCH USERS - CORRECT 3 PRIORITY LOGIC ====================
 def match_users():
-    global waiting_random, waiting_premium_opposite, active_pairs
+    global waiting_random, waiting_opposite, active_pairs
 
-    # P1: Premium Opposite ↔ Premium Opposite
     i = 0
-    while i < len(waiting_premium_opposite):
-        uid1 = waiting_premium_opposite[i]
-        u1 = db_get_user(uid1)
-        
-        if not u1 or not u1.get("gender"):
+    while i < len(waiting_opposite):
+        uid, searcher_gender = waiting_opposite[i]
+        if not db_is_premium(uid):
             i += 1
             continue
-        
-        gender1 = u1.get("gender")
-        needed_gender = "Male" if gender1 == "Female" else "Female"
+
+        needed_gender = "Male" if searcher_gender == "Female" else "Female"
 
         with queue_lock:
-            for j in range(i + 1, len(waiting_premium_opposite)):
-                uid2 = waiting_premium_opposite[j]
-                u2 = db_get_user(uid2)
-                
-                if u2 and u2.get("gender") == needed_gender:
-                    waiting_premium_opposite.pop(j)
-                    waiting_premium_opposite.pop(i)
-                    
+            for j in range(i + 1, len(waiting_opposite)):
+                other_uid, other_gender = waiting_opposite[j]
+                if db_is_premium(other_uid) and other_gender == needed_gender:
+                    waiting_opposite.pop(j)
+                    waiting_opposite.pop(i)
                     with active_pairs_lock:
-                        active_pairs[uid1] = uid2
-                        active_pairs[uid2] = uid1
-                    
+                        active_pairs[uid] = other_uid
+                        active_pairs[other_uid] = uid
+                    u1 = db_get_user(uid)
+                    u2 = db_get_user(other_uid)
                     try:
-                        bot.send_message(uid1, format_partner_found_message(u2, uid1), reply_markup=chat_keyboard())
-                        bot.send_message(uid2, format_partner_found_message(u1, uid2), reply_markup=chat_keyboard())
-                        logger.info(f"✅ P1: {uid1}({gender1}) PREM-OPP ↔ {uid2}({u2['gender']}) PREM-OPP")
+                        bot.send_message(uid, format_partner_found_message(u2, uid), reply_markup=chat_keyboard())
+                        bot.send_message(other_uid, format_partner_found_message(u1, other_uid), reply_markup=chat_keyboard())
+                        logger.info(f"✅ P1: {uid}({u1['gender']}) PREM ↔ {other_uid}({u2['gender']}) PREM")
                     except:
                         pass
                     return
         i += 1
 
-    # P2: Random ↔ Random (FAIR)
     with queue_lock:
-        while len(waiting_random) >= 2:
-            u1 = waiting_random.pop(0)
-            u2 = waiting_random.pop(0)
-            
-            with active_pairs_lock:
-                active_pairs[u1] = u2
-                active_pairs[u2] = u1
-            
-            u1_data = db_get_user(u1)
-            u2_data = db_get_user(u2)
-            
-            try:
-                bot.send_message(u1, format_partner_found_message(u2_data, u1), reply_markup=chat_keyboard())
-                bot.send_message(u2, format_partner_found_message(u1_data, u2), reply_markup=chat_keyboard())
-                logger.info(f"✅ P2: {u1}({u1_data['gender']}) RANDOM ↔ {u2}({u2_data['gender']}) RANDOM (FAIR)")
-            except:
-                pass
-            return
+        opposite_copy = waiting_opposite.copy()
 
-    # P3: Premium Opposite ↔ Random
-    for uid1 in list(waiting_premium_opposite):
-        u1 = db_get_user(uid1)
-        
-        if not u1 or not u1.get("gender"):
+    for uid, searcher_gender in opposite_copy:
+        if not db_is_premium(uid):
             continue
-        
-        gender1 = u1.get("gender")
-        needed_gender = "Male" if gender1 == "Female" else "Female"
+
+        needed_gender = "Male" if searcher_gender == "Female" else "Female"
 
         with queue_lock:
-            for j, uid2 in enumerate(waiting_random):
-                u2 = db_get_user(uid2)
-                
-                if u2 and u2.get("gender") == needed_gender:
+            for j, other_uid in enumerate(waiting_random):
+                if db_is_premium(other_uid):
+                    continue
+                other_data = db_get_user(other_uid)
+                if other_data and other_data.get('gender') == needed_gender:
                     found_uid = waiting_random.pop(j)
-                    waiting_premium_opposite = [u for u in waiting_premium_opposite if u != uid1]
-                    
+                    waiting_opposite = [(u, g) for u, g in waiting_opposite if u != uid]
                     with active_pairs_lock:
-                        active_pairs[uid1] = found_uid
-                        active_pairs[found_uid] = uid1
-                    
+                        active_pairs[uid] = found_uid
+                        active_pairs[found_uid] = uid
+                    u1 = db_get_user(uid)
+                    u2 = db_get_user(found_uid)
                     try:
-                        bot.send_message(uid1, format_partner_found_message(u2, uid1), reply_markup=chat_keyboard())
+                        bot.send_message(uid, format_partner_found_message(u2, uid), reply_markup=chat_keyboard())
                         bot.send_message(found_uid, format_partner_found_message(u1, found_uid), reply_markup=chat_keyboard())
-                        logger.info(f"✅ P3: {uid1}({gender1}) PREM-OPP ↔ {found_uid}({u2['gender']}) RANDOM")
+                        logger.info(f"✅ P2: {uid}({u1['gender']}) PREM-OPP ↔ {found_uid}({u2['gender']}) FREE-RND")
                     except:
                         pass
                     return
 
-# ==================== CLEANUP ====================
+    with queue_lock:
+        while len(waiting_random) >= 2:
+            u1 = waiting_random.pop(0)
+            u2 = waiting_random.pop(0)
+            if db_is_premium(u1) or db_is_premium(u2):
+                waiting_random.insert(0, u1)
+                if u1 != u2:
+                    waiting_random.insert(0, u2)
+                break
+            with active_pairs_lock:
+                active_pairs[u1] = u2
+                active_pairs[u2] = u1
+            u1_data = db_get_user(u1)
+            u2_data = db_get_user(u2)
+            try:
+                bot.send_message(u1, format_partner_found_message(u2_data, u1), reply_markup=chat_keyboard())
+                bot.send_message(u2, format_partner_found_message(u1_data, u2), reply_markup=chat_keyboard())
+                logger.info(f"✅ P3: {u1}({u1_data['gender']}) FREE ↔ {u2}({u2_data['gender']}) FREE")
+            except:
+                pass
+
+# ==================== CLEANUP THREADS ====================
 def cleanup_threads():
     def run():
         while True:
@@ -814,9 +692,7 @@ def cmd_start(message):
             types.InlineKeyboardButton("👨 Male", callback_data="sex:male"),
             types.InlineKeyboardButton("👩 Female", callback_data="sex:female")
         )
-        bot.send_message(user.id, "👋 Welcome to GhostTalk!
-
-🎯 Select your gender:", reply_markup=markup)
+        bot.send_message(user.id, "👋 Welcome to GhostTalk!\n\n🎯 Select your gender:", reply_markup=markup)
     elif not u["age"]:
         bot.send_message(user.id, "📍 Enter your age (12-99):")
         pending_age.add(user.id)
@@ -828,122 +704,14 @@ def cmd_start(message):
     else:
         premium_status = "✅ Premium" if db_is_premium(user.id) else "🆓 Free"
         welcome_msg = (
-            f"👋 Welcome back!
-
-"
-            f"👤 Gender: {u['gender']}
-"
-            f"🎂 Age: {u['age']}
-"
-            f"🌍 Country: {u['country_flag']} {u['country']}
-"
-            f"{premium_status}
-
-"
+            f"👋 Welcome back!\n\n"
+            f"👤 Gender: {u['gender']}\n"
+            f"🎂 Age: {u['age']}\n"
+            f"🌍 Country: {u['country_flag']} {u['country']}\n"
+            f"{premium_status}\n\n"
             "🎯 Ready to chat?"
         )
         bot.send_message(user.id, welcome_msg, reply_markup=main_keyboard(user.id))
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("sex:"))
-def callback_set_gender(call):
-    uid = call.from_user.id
-    db_create_user_if_missing(call.from_user)
-
-    if db_is_banned(uid):
-        bot.answer_callback_query(call.id, "🚫 Banned", show_alert=True)
-        return
-
-    u = db_get_user(uid)
-    if u and u["gender"]:
-        if uid != ADMIN_ID and not db_is_premium(uid):
-            bot.answer_callback_query(call.id, "💎 Gender change = PREMIUM only!", show_alert=True)
-            return
-
-    _, gender = call.data.split(":")
-
-    gender_display = "Male" if gender == "male" else "Female" if gender == "female" else "Not specified"
-    gender_emoji = "👨" if gender == "male" else "👩" if gender == "female" else "👤"
-
-    u = db_get_user(uid)
-    if u and u["gender"] == gender_display:
-        bot.answer_callback_query(call.id, f"Already {gender_display}!", show_alert=True)
-        return
-
-    db_set_gender(uid, gender_display)
-    bot.answer_callback_query(call.id, "✅ Gender set!", show_alert=True)
-
-    try:
-        bot.edit_message_text(f"✅ {gender_emoji} {gender_display}", call.message.chat.id, call.message.message_id)
-    except:
-        pass
-
-    try:
-        bot.send_message(uid, f"✅ Gender: {gender_emoji} {gender_display}
-
-📍 Enter your age (12-99):")
-        pending_age.add(uid)
-        bot.register_next_step_handler(call.message, process_new_age)
-    except:
-        pass
-
-def process_new_age(message):
-    uid = message.from_user.id
-    text = (message.text or "").strip()
-
-    if uid not in pending_age:
-        bot.send_message(uid, "Use /start first")
-        return
-
-    if not text.isdigit():
-        bot.send_message(uid, f"❌ '{text}' not valid.
-
-Enter age (12-99):")
-        bot.register_next_step_handler(message, process_new_age)
-        return
-
-    age = int(text)
-    if age < 12 or age > 99:
-        bot.send_message(uid, f"❌ Age {age} out of range (12-99).
-
-Try again:")
-        bot.register_next_step_handler(message, process_new_age)
-        return
-
-    db_set_age(uid, age)
-    pending_age.discard(uid)
-
-    u = db_get_user(uid)
-    if not u["country"]:
-        bot.send_message(uid, f"✅ Age: {age} 🎂
-
-🌍 Now enter your country:")
-        pending_country.add(uid)
-        bot.register_next_step_handler(message, process_new_country)
-    else:
-        bot.send_message(uid, f"✅ Age: {age} 🎂", reply_markup=main_keyboard(uid))
-
-def process_new_country(message):
-    uid = message.from_user.id
-    text = (message.text or "").strip()
-
-    if uid not in pending_country:
-        bot.send_message(uid, "Use /start first")
-        return
-
-    country_info = get_country_info(text)
-    if not country_info:
-        bot.send_message(uid, f"❌ '{text}' not valid.
-
-Try again (e.g., India):")
-        bot.register_next_step_handler(message, process_new_country)
-        return
-
-    country_name, country_flag = country_info
-    db_set_country(uid, country_name, country_flag)
-    pending_country.discard(uid)
-    bot.send_message(uid, f"✅ Country: {country_flag} {country_name}
-
-🎯 Profile complete!", reply_markup=main_keyboard(uid))
 
 @bot.message_handler(commands=['help'])
 def cmd_help(message):
@@ -952,7 +720,6 @@ def cmd_help(message):
 
 🔀 Search Random - Find any random partner
 🎯 Search Opposite Gender - Find opposite gender (PREMIUM)
-🔌 Reconnect - Try to restore last partner (5 min)
 📊 Stats - View your stats
 ⚙️ Settings - Change profile
 👥 Refer - Get referral link
@@ -986,6 +753,102 @@ def cmd_rules(message):
 Report abusive users!"""
     bot.send_message(uid, rules_text, reply_markup=main_keyboard(uid))
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("sex:"))
+def callback_set_gender(call):
+    uid = call.from_user.id
+    db_create_user_if_missing(call.from_user)
+
+    if db_is_banned(uid):
+        bot.answer_callback_query(call.id, "🚫 Banned", show_alert=True)
+        return
+
+    u = db_get_user(uid)
+    if u and u["gender"]:
+        if uid != ADMIN_ID and not db_is_premium(uid):
+            bot.answer_callback_query(call.id, "💎 Gender change = PREMIUM only!", show_alert=True)
+            return
+
+    _, gender = call.data.split(":")
+
+    if gender == "male":
+        gender_display = "Male"
+        gender_emoji = "👨"
+    elif gender == "female":
+        gender_display = "Female"
+        gender_emoji = "👩"
+    else:
+        gender_display = "Not specified"
+        gender_emoji = "👤"
+
+    u = db_get_user(uid)
+    if u and u["gender"] == gender_display:
+        bot.answer_callback_query(call.id, f"Already {gender_display}!", show_alert=True)
+        return
+
+    db_set_gender(uid, gender_display)
+    bot.answer_callback_query(call.id, "✅ Gender set!", show_alert=True)
+
+    try:
+        bot.edit_message_text(f"✅ {gender_emoji} {gender_display}", call.message.chat.id, call.message.message_id)
+    except:
+        pass
+
+    try:
+        bot.send_message(uid, f"✅ Gender: {gender_emoji} {gender_display}\n\n📍 Enter your age (12-99):")
+        pending_age.add(uid)
+        bot.register_next_step_handler(call.message, process_new_age)
+    except:
+        pass
+
+def process_new_age(message):
+    uid = message.from_user.id
+    text = (message.text or "").strip()
+
+    if uid not in pending_age:
+        bot.send_message(uid, "Use /start first")
+        return
+
+    if not text.isdigit():
+        bot.send_message(uid, f"❌ '{text}' not valid.\n\nEnter age (12-99):")
+        bot.register_next_step_handler(message, process_new_age)
+        return
+
+    age = int(text)
+    if age < 12 or age > 99:
+        bot.send_message(uid, f"❌ Age {age} out of range (12-99).\n\nTry again:")
+        bot.register_next_step_handler(message, process_new_age)
+        return
+
+    db_set_age(uid, age)
+    pending_age.discard(uid)
+
+    u = db_get_user(uid)
+    if not u["country"]:
+        bot.send_message(uid, f"✅ Age: {age} 🎂\n\n🌍 Now enter your country:")
+        pending_country.add(uid)
+        bot.register_next_step_handler(message, process_new_country)
+    else:
+        bot.send_message(uid, f"✅ Age: {age} 🎂", reply_markup=main_keyboard(uid))
+
+def process_new_country(message):
+    uid = message.from_user.id
+    text = (message.text or "").strip()
+
+    if uid not in pending_country:
+        bot.send_message(uid, "Use /start first")
+        return
+
+    country_info = get_country_info(text)
+    if not country_info:
+        bot.send_message(uid, f"❌ '{text}' not valid.\n\nTry again (e.g., India):")
+        bot.register_next_step_handler(message, process_new_country)
+        return
+
+    country_name, country_flag = country_info
+    db_set_country(uid, country_name, country_flag)
+    pending_country.discard(uid)
+    bot.send_message(uid, f"✅ Country: {country_flag} {country_name}\n\n🎯 Profile complete!", reply_markup=main_keyboard(uid))
+
 @bot.message_handler(commands=['settings'])
 def cmd_settings(message):
     uid = message.from_user.id
@@ -996,30 +859,19 @@ def cmd_settings(message):
     premium_status = "✅ Premium" if db_is_premium(uid) else "🆓 Free"
     gender_emoji = "👨" if u.get("gender") == "Male" else "👩" if u.get("gender") == "Female" else "👤"
     settings_text = (
-        "⚙️ SETTINGS
-
-"
-        f"👤 Gender: {gender_emoji} {u.get('gender') or 'Not set'}
-"
-        f"🎂 Age: {u.get('age') or 'Not set'}
-"
-        f"🌍 Country: {u.get('country_flag') or '🌍'} {u.get('country') or 'Not set'}
-
-"
-        f"📊 Messages: {u.get('messages_sent')}
-"
-        f"✅ Media Approved: {u.get('media_approved')}
-"
-        f"❌ Media Rejected: {u.get('media_rejected')}
-
-"
-        f"👥 Referred: {u.get('referral_count')}/3
-"
+        "⚙️ SETTINGS\n\n"
+        f"👤 Gender: {gender_emoji} {u.get('gender') or 'Not set'}\n"
+        f"🎂 Age: {u.get('age') or 'Not set'}\n"
+        f"🌍 Country: {u.get('country_flag') or '🌍'} {u.get('country') or 'Not set'}\n\n"
+        f"📊 Messages: {u.get('messages_sent')}\n"
+        f"✅ Media Approved: {u.get('media_approved')}\n"
+        f"❌ Media Rejected: {u.get('media_rejected')}\n\n"
+        f"👥 Referred: {u.get('referral_count')}/3\n"
         f"{premium_status}"
     )
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(types.InlineKeyboardButton("🎂 Change Age", callback_data="age:change"))
-    markup.row(types.InlineKeyboardButton("👨 Male", callback_data="sex:male"), types.InlineKeyboardButton("👩 Female", callback_data="sex:female"))
+    markup.row(types.InlineKeyboardButton("👨 Gender", callback_data="sex:male"), types.InlineKeyboardButton("👩 Gender", callback_data="sex:female"))
     markup.row(types.InlineKeyboardButton("🌍 Change Country", callback_data="set:country"))
     bot.send_message(uid, settings_text, reply_markup=markup)
 
@@ -1056,23 +908,15 @@ def cmd_refer(message):
         ref_link = f"REFCODE:{u['referral_code']}"
     remaining = PREMIUM_REFERRALS_NEEDED - u.get("referral_count", 0)
     refer_text = (
-        "👥 REFERRAL SYSTEM
-
-"
-        f"🔗 {ref_link}
-
-"
-        f"👥 Referred: {u.get('referral_count', 0)}/{PREMIUM_REFERRALS_NEEDED}
-"
-        f"🎁 Reward: {PREMIUM_DURATION_HOURS}h Premium
-"
+        "👥 REFERRAL SYSTEM\n\n"
+        f"🔗 {ref_link}\n\n"
+        f"👥 Referred: {u.get('referral_count', 0)}/{PREMIUM_REFERRALS_NEEDED}\n"
+        f"🎁 Reward: {PREMIUM_DURATION_HOURS}h Premium\n"
     )
     if remaining > 0:
-        refer_text += f"
-📍 Invite {remaining} more!"
+        refer_text += f"\n📍 Invite {remaining} more!"
     else:
-        refer_text += "
-✅ Premium unlocked!"
+        refer_text += "\n✅ Premium unlocked!"
     bot.send_message(uid, refer_text)
 
 @bot.message_handler(commands=['search_random'])
@@ -1095,20 +939,17 @@ def cmd_search_random(message):
     remove_from_queues(uid)
     with queue_lock:
         waiting_random.append(uid)
-    bot.send_message(uid, "🔍 Searching for a random partner...
-⏳ Wait")
+    bot.send_message(uid, "🔍 Searching...\n⏳ Wait")
     match_users()
 
-@bot.message_handler(commands=['search_opposite'])
+@bot.message_handler(commands=['search_opposite_gender'])
 def cmd_search_opposite(message):
     uid = message.from_user.id
     if db_is_banned(uid):
         bot.send_message(uid, "🚫 Banned")
         return
     if not db_is_premium(uid):
-        bot.send_message(uid, "💎 PREMIUM REQUIRED!
-
-✨ Refer 3 friends to unlock!")
+        bot.send_message(uid, "💎 PREMIUM REQUIRED!\n\n✨ Refer 3 friends to unlock!")
         return
     u = db_get_user(uid)
     if not u or not u.get("gender") or not u.get("age") or not u.get("country"):
@@ -1125,17 +966,15 @@ def cmd_search_opposite(message):
     logger.info(f"🎯 {uid} ({u.get('gender')}) searching opposite ({opposite_gen})")
     remove_from_queues(uid)
     with queue_lock:
-        waiting_premium_opposite.append(uid)
-    bot.send_message(uid, f"🎯 Searching for {opposite_gen}...
-⏳ Wait")
+        waiting_opposite.append((uid, u.get("gender")))
+    bot.send_message(uid, f"🎯 Searching {opposite_gen}...\n⏳ Wait")
     match_users()
 
-# ==================== ROBUST STOP COMMAND ====================
+# --- Robust stop command (single handler) ---
 @bot.message_handler(commands=['stop'])
 def cmd_stop(message):
     uid = message.from_user.id
     logger.info(f"CMD /stop invoked by {uid}")
-    
     try:
         if is_searching(uid):
             remove_from_queues(uid)
@@ -1143,25 +982,36 @@ def cmd_stop(message):
             return
     except Exception as e:
         logger.error(f"stop:is_searching error for {uid}: {e}")
-    
     try:
         with active_pairs_lock:
             if uid in active_pairs:
                 disconnect_user(uid)
-                bot.send_message(uid, "✅ Chat stopped", reply_markup=main_keyboard(uid))
+                bot.send_message(uid, "✅ Stopped", reply_markup=main_keyboard(uid))
                 return
     except Exception as e:
         logger.error(f"stop:disconnect error for {uid}: {e}")
-    
-    bot.send_message(uid, "❌ Not currently searching or chatting.
+    now_ts = time.time()
+    send_msg = False
+    try:
+        with stop_cooldown_lock:
+            last = stop_cooldown.get(uid)
+            if not last or (now_ts - last) > 30:
+                stop_cooldown[uid] = now_ts
+                send_msg = True
+    except Exception as e:
+        logger.error(f"stop:cooldown lock error for {uid}: {e}")
+        send_msg = True
+    if send_msg:
+        bot.send_message(uid, "❌ Not currently searching or chatting.", reply_markup=main_keyboard(uid))
+    else:
+        logger.debug(f"stop: suppressed repetitive /stop for {uid}")
 
-Use 🔀 Search Random to begin!", reply_markup=main_keyboard(uid))
-
-@bot.message_handler(func=lambda m: isinstance(m.text, str) and m.text.strip().lower() in {
+# --- Fallback text handler so users can type "stop" or send the emoji ---
+@bot.message_handler(func=lambda message: isinstance(message.text, str) and message.text.strip().lower() in {
     "stop", "/stop", "🛑 stop", "🛑", "stop chat", "stopchat"
 })
 def handle_stop_text(message):
-    logger.info(f"Fallback STOP handler triggered by {message.from_user.id} -> '{message.text}'")
+    logger.info(f"Fallback STOP text handler triggered by {message.from_user.id} -> '{message.text}'")
     cmd_stop(message)
 
 @bot.message_handler(commands=['next'])
@@ -1175,334 +1025,389 @@ def cmd_next(message):
     bot.send_message(uid, "🔍 Looking for new partner...", reply_markup=main_keyboard(uid))
     cmd_search_random(message)
 
-# ==================== RECONNECT COMMAND ====================
-@bot.message_handler(commands=['reconnect'])
-def cmd_reconnect(message):
-    """
-    Reconnect to recent partner
-    - Max 5 min window after disconnect (DB based)
-    - Partner can Accept / Reject
-    - Fails if anyone already chatting
-    - 24h cooldown after successful reconnect
-    """
+@bot.callback_query_handler(func=lambda c: c.data.startswith("rep:"))
+def callback_report(call):
+    uid = call.from_user.id
+    parts = call.data.split(":", 1)
+    if len(parts) == 1:
+        bot.answer_callback_query(call.id, "Invalid", show_alert=True)
+        return
+    _, report_type = parts
+    if report_type == "skip":
+        bot.answer_callback_query(call.id, "✅ Skipped", show_alert=False)
+        try:
+            bot.edit_message_text("✓ Report skipped", call.message.chat.id, call.message.message_id)
+        except:
+            pass
+        return
+    if uid not in chat_history_with_time:
+        bot.answer_callback_query(call.id, "❌ Chat data expired", show_alert=True)
+        return
+    partner_id, _ = chat_history_with_time[uid]
+    report_type_map = {
+        "spam": "Spam",
+        "unwanted": "Unwanted Content",
+        "inappropriate": "Inappropriate Messages",
+        "suspicious": "Suspicious Activity",
+        "other": "Other"
+    }
+    report_type_name = report_type_map.get(report_type, "Other")
+    if report_type == "other":
+        report_reason_pending[uid] = (partner_id, report_type_name)
+        bot.answer_callback_query(call.id, "Type reason...", show_alert=False)
+        bot.send_message(uid, "📝 Type reason (short, max 100 chars):")
+        bot.register_next_step_handler(call.message, process_report_reason)
+        return
+    db_add_report(uid, partner_id, report_type_name, "")
+    forward_full_chat_to_admin(uid, partner_id, report_type_name, "")
+    db_ban_user(partner_id, hours=TEMP_BAN_HOURS, reason=report_type_name)
+    try:
+        if uid in chat_history_with_time:
+            del chat_history_with_time[uid]
+    except:
+        pass
+    bot.send_message(uid, "✅ Report submitted! User banned for 24 hours.", reply_markup=main_keyboard(uid))
+    bot.answer_callback_query(call.id, "✅ Reported", show_alert=False)
+    try:
+        bot.edit_message_text("✓ Report submitted", call.message.chat.id, call.message.message_id)
+    except:
+        pass
+    logger.info(f"📊 Report: {uid} reported {partner_id} for {report_type_name}")
+
+def process_report_reason(message):
     uid = message.from_user.id
-    
+    reason = (message.text or "").strip()[:100]
+    if uid not in report_reason_pending:
+        bot.send_message(uid, "❌ Report expired. Try again.", reply_markup=main_keyboard(uid))
+        return
+    partner_id, report_type = report_reason_pending.pop(uid)
+    if not reason:
+        bot.send_message(uid, "❌ Reason cannot be empty!", reply_markup=main_keyboard(uid))
+        return
+    db_add_report(uid, partner_id, report_type, reason)
+    forward_full_chat_to_admin(uid, partner_id, report_type, reason)
+    db_ban_user(partner_id, hours=TEMP_BAN_HOURS, reason=report_type)
+    try:
+        if uid in chat_history_with_time:
+            del chat_history_with_time[uid]
+    except:
+        pass
+    bot.send_message(uid, "✅ Report submitted! User banned for 24 hours.", reply_markup=main_keyboard(uid))
+    logger.info(f"📊 Report: {uid} reported {partner_id} for {report_type} - Reason: {reason}")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("fb:"))
+def callback_feedback(call):
+    uid = call.from_user.id
+    _, fb_type = call.data.split(":")
+    fb_map = {
+        "good": "👍 Marked as good talk",
+        "rude": "👎 Reported as rude",
+        "boring": "💤 Marked as boring",
+        "fake": "🎭 Reported as fake profile"
+    }
+    bot.answer_callback_query(call.id, fb_map.get(fb_type, "Thanks!"), show_alert=False)
+    logger.info(f"📊 Feedback: {uid} → {fb_type}")
+
+@bot.message_handler(commands=['pradd'])
+def cmd_pradd(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.send_message(message.from_user.id, "❌ Admin only!")
+        return
+    parts = message.text.split()
+    if len(parts) < 3:
+        bot.reply_to(message, "Usage: /pradd [user_id] [YYYY-MM-DD]")
+        return
+    try:
+        target_id = int(parts[1])
+    except:
+        bot.reply_to(message, "❌ Invalid user_id")
+        return
+    if not db_set_premium(target_id, parts[2]):
+        bot.reply_to(message, "❌ Invalid date")
+        return
+    bot.reply_to(message, f"✅ Premium added to {target_id}")
+
+@bot.message_handler(commands=['ban'])
+def cmd_ban(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.send_message(message.from_user.id, "❌ Admin only!")
+        return
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 2:
+        bot.reply_to(message, "Usage: /ban [user_id] [hours]")
+        return
+    try:
+        target_id = int(parts[1])
+        hours = int(parts[2]) if len(parts) > 2 else 24
+    except:
+        bot.reply_to(message, "❌ Invalid")
+        return
+    db_ban_user(target_id, hours=hours, reason="Banned by admin")
+    bot.reply_to(message, f"✅ User {target_id} banned for {hours}h")
+
+@bot.message_handler(commands=['unban'])
+def cmd_unban(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.send_message(message.from_user.id, "❌ Admin only!")
+        return
+    parts = message.text.split()
+    if len(parts) < 2:
+        bot.reply_to(message, "Usage: /unban [user_id]")
+        return
+    try:
+        target_id = int(parts[1])
+    except:
+        bot.reply_to(message, "❌ Invalid user_id")
+        return
+    with get_conn() as conn:
+        conn.execute("DELETE FROM bans WHERE user_id=?", (target_id,))
+        conn.commit()
+    bot.reply_to(message, f"✅ User {target_id} unbanned")
+
+# ==================== MEDIA HANDLERS ====================
+@bot.message_handler(content_types=['photo', 'document', 'video', 'animation', 'sticker', 'voice', 'audio'])
+def handle_media(m):
+    uid = m.from_user.id
     if db_is_banned(uid):
         bot.send_message(uid, "🚫 Banned")
         return
-    
-    # cooldown check
-    with reconnect_lock:
-        if uid in reconnect_cooldown:
-            try:
-                cooldown_until = datetime.fromisoformat(reconnect_cooldown[uid])
-                if cooldown_until > datetime.utcnow():
-                    remaining = cooldown_until - datetime.utcnow()
-                    hours = remaining.seconds // 3600
-                    if hours < 1:
-                        minutes = max(1, remaining.seconds // 60)
-                        bot.send_message(uid, f"⏳ Reconnect available in {minutes} min")
-                    else:
-                        bot.send_message(uid, f"⏳ Reconnect available in {hours} h")
-                    return
-                else:
-                    del reconnect_cooldown[uid]
-            except:
-                del reconnect_cooldown[uid]
-    
     with active_pairs_lock:
-        if uid in active_pairs:
-            bot.send_message(uid, "⏳ Already chatting!
-
-Use /stop first")
+        if uid not in active_pairs:
+            bot.send_message(uid, "❌ Not connected")
             return
-    
-    partner_id = db_get_recent_partner(uid)
-    if not partner_id:
-        bot.send_message(uid, "❌ No recent partner found.
-
-5 min window expired or no chat history.")
+        partner = active_pairs[uid]
+    media_type = m.content_type
+    if media_type == "photo":
+        media_id = m.photo[-1].file_id
+    elif media_type == "document":
+        media_id = m.document.file_id
+    elif media_type == "video":
+        media_id = m.video.file_id
+    elif media_type == "animation":
+        media_id = m.animation.file_id
+    elif media_type == "sticker":
+        media_id = m.sticker.file_id
+    elif media_type == "voice":
+        media_id = m.voice.file_id
+    elif media_type == "audio":
+        media_id = m.audio.file_id
+    else:
         return
-    
-    with active_pairs_lock:
-        if partner_id in active_pairs:
-            bot.send_message(uid, "❌ Partner is already chatting with someone.
-Reconnect not possible now.")
-            return
-    
-    if is_searching(partner_id):
-        bot.send_message(uid, "⏳ Partner is searching for someone else.
-Try again later.")
-        return
-    
     u = db_get_user(uid)
-    first_name = (u.get("first_name") if u else "") or "User"
-    
-    reconnect_markup = types.InlineKeyboardMarkup(row_width=2)
-    reconnect_markup.add(
-        types.InlineKeyboardButton("✅ Accept", callback_data=f"recon:accept:{uid}"),
-        types.InlineKeyboardButton("❌ Reject", callback_data=f"recon:reject:{uid}")
-    )
-    
-    with reconnect_lock:
-        reconnect_requests[uid] = (partner_id, datetime.utcnow())
-    
-    try:
-        bot.send_message(
-            partner_id,
-            f"🔌 {first_name} wants to reconnect!
-
-⏳ Request valid for 5 minutes.",
-            reply_markup=reconnect_markup
-        )
-        bot.send_message(uid, "🔌 Reconnect request sent!
-⏳ Waiting for partner's response (5 min)...")
-        logger.info(f"🔌 Reconnect request: {uid} → {partner_id}")
-    except Exception as e:
-        logger.error(f"Reconnect send error: {e}")
-        bot.send_message(uid, "❌ Could not send reconnect request.")
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("recon:"))
-def handle_reconnect_response(call):
-    """Handle partner's accept/reject of reconnect"""
-    partner_id = call.from_user.id
-    parts = call.data.split(":")
-    action = parts[1]
-    requester_id = int(parts[2])
-    
-    with reconnect_lock:
-        if requester_id not in reconnect_requests:
-            bot.answer_callback_query(call.id, "Request expired", show_alert=True)
-            return
-        
-        stored_partner, req_time = reconnect_requests[requester_id]
-        
-        if stored_partner != partner_id:
-            bot.answer_callback_query(call.id, "Invalid request", show_alert=True)
-            return
-        
-        if (datetime.utcnow() - req_time).seconds > RECONNECT_TIMEOUT:
-            bot.answer_callback_query(call.id, "Request expired (5 min timeout)", show_alert=True)
-            del reconnect_requests[requester_id]
-            return
-        
-        del reconnect_requests[requester_id]
-    
-    if action == "accept":
-        with active_pairs_lock:
-            if requester_id in active_pairs or partner_id in active_pairs:
-                bot.answer_callback_query(call.id, "❌ One user already chatting", show_alert=True)
-                try:
-                    bot.send_message(requester_id, "❌ Reconnect failed - partner started new chat.")
-                except:
-                    pass
-                return
-            
-            active_pairs[requester_id] = partner_id
-            active_pairs[partner_id] = requester_id
-        
-        db_clear_recent_partner(requester_id)
-        db_clear_recent_partner(partner_id)
-        
-        cooldown_until = (datetime.utcnow() + timedelta(hours=RECONNECT_COOLDOWN_HOURS)).isoformat()
-        with reconnect_lock:
-            reconnect_cooldown[requester_id] = cooldown_until
-            reconnect_cooldown[partner_id] = cooldown_until
-        
-        bot.answer_callback_query(call.id, "✅ Reconnected!", show_alert=False)
+    if u and u.get("media_approved"):
         try:
-            bot.send_message(
-                requester_id,
-                "✅ Reconnected to previous partner!
-💬 Enjoy chat!",
-                reply_markup=chat_keyboard()
-            )
-            bot.send_message(
-                partner_id,
-                "✅ Reconnected to previous partner!
-💬 Enjoy chat!",
-                reply_markup=chat_keyboard()
-            )
-            logger.info(f"✅ RECONNECT SUCCESS: {requester_id} ↔ {partner_id}")
-        except Exception as e:
-            logger.error(f"Reconnect notify error: {e}")
-    
-    else:  # reject
-        bot.answer_callback_query(call.id, "❌ Rejected", show_alert=False)
-        try:
-            bot.send_message(requester_id, "❌ Partner rejected reconnect.")
-            logger.info(f"❌ RECONNECT REJECTED: {requester_id} ← {partner_id}")
+            if media_type == "photo":
+                bot.send_photo(partner, media_id)
+            elif media_type == "document":
+                bot.send_document(partner, media_id)
+            elif media_type == "video":
+                bot.send_video(partner, media_id)
+            elif media_type == "animation":
+                bot.send_animation(partner, media_id)
+            elif media_type == "sticker":
+                bot.send_sticker(partner, media_id)
+            elif media_type == "voice":
+                bot.send_voice(partner, media_id)
+            elif media_type == "audio":
+                bot.send_audio(partner, media_id)
+            db_increment_media(uid, "approved")
+            append_chat_history(uid, m.chat.id, m.message_id)
         except:
-            pass
-
-# ==================== MESSAGE FORWARDING ====================
-@bot.message_handler(func=lambda m: True, content_types=['text'])
-def forward_chat_message(message):
-    uid = message.from_user.id
-    
-    if is_banned_content(message.text):
-        warn_user(uid, "Banned content detected")
+            bot.send_message(uid, "❌ Could not send")
         return
-    
-    with active_pairs_lock:
-        if uid not in active_pairs:
-            return
-        
-        partner_id = active_pairs[uid]
-    
-    try:
-        u = db_get_user(uid)
-        first_name = u.get("first_name") if u else "Unknown"
-        msg = f"💬 {first_name}: {message.text}"
-        bot.send_message(partner_id, msg)
-        
-        with get_conn() as conn:
-            conn.execute("UPDATE users SET messages_sent=messages_sent+1 WHERE user_id=?", (uid,))
-            conn.commit()
-        
-        logger.debug(f"📨 {uid} → {partner_id}: {message.text[:50]}")
-    except Exception as e:
-        logger.error(f"Forward message error: {e}")
-
-# ==================== MEDIA HANDLERS ====================
-@bot.message_handler(func=lambda m: True, content_types=['photo', 'video', 'document'])
-def handle_media(message):
-    uid = message.from_user.id
-    
-    with active_pairs_lock:
-        if uid not in active_pairs:
-            bot.send_message(uid, "❌ Not in chat")
-            return
-        
-        partner_id = active_pairs[uid]
-    
-    pending_media[partner_id] = (uid, message)
-    
-    u = db_get_user(uid)
-    first_name = u.get("first_name") if u else "Unknown"
-    media_type = "📸 Photo" if message.content_type == "photo" else "🎬 Video" if message.content_type == "video" else "📎 File"
-    
+    token = f"{uid}{int(time.time()*1000)}{secrets.token_hex(4)}"
+    with pending_media_lock:
+        pending_media[token] = {
+            "sender": uid, "partner": partner, "media_type": media_type,
+            "file_id": media_id, "msg_id": None, "timestamp": datetime.utcnow().isoformat()
+        }
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("✅ Accept", callback_data=f"media:accept:{uid}"),
-        types.InlineKeyboardButton("❌ Reject", callback_data=f"media:reject:{uid}")
+        types.InlineKeyboardButton("✅ Accept", callback_data=f"app:{token}"),
+        types.InlineKeyboardButton("❌ Reject", callback_data=f"rej:{token}")
     )
-    
-    msg_text = f"{media_type} from {first_name}
-
-Allow?"
-    bot.send_message(partner_id, msg_text, reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("media:"))
-def handle_media_approval(call):
-    uid = call.from_user.id
-    parts = call.data.split(":")
-    action = parts[1]
-    sender_id = int(parts[2])
-    
-    if sender_id not in pending_media or pending_media[sender_id][0] != sender_id:
-        bot.answer_callback_query(call.id, "Media request expired", show_alert=True)
-        return
-    
     try:
-        _, message = pending_media[sender_id]
-        
-        if action == "accept":
-            try:
-                if message.content_type == "photo":
-                    bot.send_photo(uid, message.photo[-1].file_id)
-                elif message.content_type == "video":
-                    bot.send_video(uid, message.video.file_id)
-                elif message.content_type == "document":
-                    bot.send_document(uid, message.document.file_id)
-            except:
-                pass
-            
-            bot.answer_callback_query(call.id, "✅ Media shared", show_alert=False)
-            db_increment_media(sender_id, "approved")
-            bot.send_message(sender_id, "✅ Media accepted!")
-        else:
-            bot.answer_callback_query(call.id, "❌ Media rejected", show_alert=False)
-            bot.send_message(sender_id, "❌ Partner rejected your media")
-            db_increment_media(sender_id, "rejected")
-        
-        del pending_media[sender_id]
-    except Exception as e:
-        logger.error(f"Media approval error: {e}")
-        bot.answer_callback_query(call.id, "Error processing media", show_alert=True)
+        msg = bot.send_message(partner, f"Partner sent {media_type}. Accept?", reply_markup=markup)
+        with pending_media_lock:
+            if token in pending_media:
+                pending_media[token]["msg_id"] = msg.message_id
+    except:
+        bot.send_message(uid, "❌ Error")
+        with pending_media_lock:
+            if token in pending_media:
+                del pending_media[token]
 
-# ==================== QUICK BUTTONS ====================
-@bot.message_handler(func=lambda m: m.text == "🔀 Search Random")
-def btn_search_random(message):
+@bot.callback_query_handler(func=lambda c: c.data.startswith("app:"))
+def approve_media_cb(call):
+    try:
+        token = call.data.split(":", 1)[1]
+        with pending_media_lock:
+            meta = pending_media.get(token)
+            if not meta:
+                bot.answer_callback_query(call.id, "Expired", show_alert=True)
+                return
+            sender_id = meta["sender"]
+            partner_id = meta["partner"]
+            media_type = meta["media_type"]
+            file_id = meta["file_id"]
+            msg_id = meta.get("msg_id")
+            if token in pending_media:
+                del pending_media[token]
+        try:
+            if media_type == "photo":
+                bot.send_photo(partner_id, file_id)
+            elif media_type == "document":
+                bot.send_document(partner_id, file_id)
+            elif media_type == "video":
+                bot.send_video(partner_id, file_id)
+            elif media_type == "animation":
+                bot.send_animation(partner_id, file_id)
+            elif media_type == "sticker":
+                bot.send_sticker(partner_id, file_id)
+            elif media_type == "voice":
+                bot.send_voice(partner_id, file_id)
+            elif media_type == "audio":
+                bot.send_audio(partner_id, file_id)
+        except:
+            pass
+        try:
+            bot.send_message(sender_id, "✅ Approved!")
+            db_increment_media(sender_id, "approved")
+        except:
+            pass
+        try:
+            bot.edit_message_text("✅ Approved", call.message.chat.id, msg_id)
+        except:
+            pass
+        bot.answer_callback_query(call.id, "✅ Approved", show_alert=False)
+    except Exception as e:
+        logger.error(f"Error: {e}")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("rej:"))
+def reject_media_cb(call):
+    try:
+        token = call.data.split(":", 1)[1]
+        with pending_media_lock:
+            meta = pending_media.get(token)
+            if not meta:
+                bot.answer_callback_query(call.id, "Expired", show_alert=True)
+                return
+            sender_id = meta["sender"]
+            msg_id = meta.get("msg_id")
+            if token in pending_media:
+                del pending_media[token]
+        try:
+            bot.send_message(sender_id, "❌ Rejected")
+            db_increment_media(sender_id, "rejected")
+        except:
+            pass
+        try:
+            bot.edit_message_text("❌ Rejected", call.message.chat.id, msg_id)
+        except:
+            pass
+        bot.answer_callback_query(call.id, "❌ Rejected", show_alert=False)
+    except Exception as e:
+        logger.error(f"Error: {e}")
+
+# ==================== BUTTON HANDLERS ====================
+@bot.message_handler(func=lambda message: message.text == "🔀 Search Random")
+def handle_search_random_btn(message):
     cmd_search_random(message)
 
-@bot.message_handler(func=lambda m: m.text == "🎯 Search Opposite Gender")
-def btn_search_opposite(message):
+@bot.message_handler(func=lambda message: message.text == "🎯 Search Opposite Gender")
+def handle_search_opposite_btn(message):
     cmd_search_opposite(message)
 
-@bot.message_handler(func=lambda m: m.text == "🛑 Stop")
-def btn_stop(message):
+@bot.message_handler(func=lambda message: message.text == "🛑 Stop")
+def handle_stop_btn(message):
     cmd_stop(message)
 
-@bot.message_handler(func=lambda m: m.text == "❓ Help")
-def btn_help(message):
-    cmd_help(message)
-
-@bot.message_handler(func=lambda m: m.text == "📋 Rules")
-def btn_rules(message):
-    cmd_rules(message)
-
-@bot.message_handler(func=lambda m: m.text == "⚙️ Settings")
-def btn_settings(message):
+@bot.message_handler(func=lambda message: message.text == "⚙️ Settings")
+def handle_settings_btn(message):
     cmd_settings(message)
 
-@bot.message_handler(func=lambda m: m.text == "👥 Refer")
-def btn_refer(message):
+@bot.message_handler(func=lambda message: message.text == "👥 Refer")
+def handle_refer_btn(message):
     cmd_refer(message)
 
-@bot.message_handler(func=lambda m: m.text == "🔌 Reconnect")
-def btn_reconnect(message):
-    cmd_reconnect(message)
+@bot.message_handler(func=lambda message: message.text == "❓ Help")
+def handle_help_btn(message):
+    cmd_help(message)
 
-@bot.message_handler(func=lambda m: m.text == "⏭️ Next")
-def btn_next(message):
-    cmd_next(message)
+@bot.message_handler(func=lambda message: message.text == "📋 Rules")
+def handle_rules_btn(message):
+    cmd_rules(message)
 
-@bot.message_handler(func=lambda m: m.text == "📊 Stats")
-def btn_stats(message):
+@bot.message_handler(func=lambda message: message.text == "📊 Stats")
+def handle_stats_btn(message):
     uid = message.from_user.id
     u = db_get_user(uid)
     if not u:
-        bot.send_message(uid, "Use /start first")
+        bot.send_message(uid, "❌ Not found")
         return
-    
-    stats_text = f"""📊 YOUR STATS
+    stats = (
+        "📊 YOUR STATS\n\n"
+        f"📨 Messages: {u.get('messages_sent')}\n"
+        f"✅ Media Approved: {u.get('media_approved')}\n"
+        f"❌ Media Rejected: {u.get('media_rejected')}\n"
+        f"👥 Referred: {u.get('referral_count')}/3"
+    )
+    bot.send_message(uid, stats, reply_markup=chat_keyboard())
 
-👤 Gender: {u.get('gender')}
-🎂 Age: {u.get('age')}
-🌍 Country: {u.get('country_flag')} {u.get('country')}
+@bot.message_handler(func=lambda message: message.text == "⏭️ Next")
+def handle_next_btn(message):
+    cmd_next(message)
 
-💬 Messages Sent: {u.get('messages_sent')}
-✅ Media Approved: {u.get('media_approved')}
-❌ Media Rejected: {u.get('media_rejected')}
+# ==================== TEXT MESSAGE HANDLER ====================
+@bot.message_handler(func=lambda message: True)
+def handle_text(message):
+    uid = message.from_user.id
+    text = message.text
+    if db_is_banned(uid):
+        bot.send_message(uid, "🚫 Banned")
+        return
+    with active_pairs_lock:
+        if uid not in active_pairs:
+            bot.send_message(uid, "❌ Not connected", reply_markup=main_keyboard(uid))
+            return
+        partner = active_pairs.get(uid)
+    if not partner:
+        bot.send_message(uid, "❌ Not connected", reply_markup=main_keyboard(uid))
+        return
+    if is_banned_content(text):
+        warn_result = warn_user(uid, "Bad content")
+        if warn_result == "ban":
+            remove_from_queues(uid)
+            disconnect_user(uid)
+        return
+    try:
+        append_chat_history(uid, message.chat.id, message.message_id)
+        u = db_get_user(uid)
+        if u:
+            with get_conn() as conn:
+                conn.execute("UPDATE users SET messages_sent=messages_sent+1 WHERE user_id=?", (uid,))
+                conn.commit()
+        bot.send_message(partner, text)
+    except Exception as e:
+        logger.error(f"Error: {e}")
 
-👥 Referred: {u.get('referral_count')}/3
-⏰ Premium: {'✅ Yes' if db_is_premium(uid) else '❌ No'}"""
-    
-    bot.send_message(uid, stats_text, reply_markup=chat_keyboard())
-
-# ==================== MAIN ====================
-if __name__ == "__main__":
+# ==================== RUN BOT ====================
+def run_bot():
+    logger.info("🤖 GhostTalk v4.1 Starting...")
     init_db()
     cleanup_threads()
-    logger.info("✅ GhostTalk Bot Started (v4.4 - DISCONNECT + RECONNECT)")
-    logger.info("✅ /reconnect to restore recent partner (5 min window)")
-    logger.info("✅ 24h cooldown after successful reconnect")
-    logger.info("✅ Auto-block if partner already chatting")
-    
+    logger.info("✅ Bot Ready!")
+    bot.infinity_polling()
+
+if __name__ == "__main__":
+    import sys
+    def run_flask():
+        port = int(os.getenv("PORT", 10000))
+        app.run(host="0.0.0.0", port=port, debug=False)
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
     try:
-        bot.infinity_polling(none_stop=True)
-    except KeyboardInterrupt:
-        logger.info("🛑 Bot stopped manually")
+        run_bot()
     except Exception as e:
-        logger.error(f"Bot error: {e}")
+        logger.error(f"Fatal: {e}")
+        sys.exit(1)
