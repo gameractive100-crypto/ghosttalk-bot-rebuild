@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-GhostTalk v5.4 - FINAL FIXED VERSION
-✅ Chat freeze fixed
-✅ Match info showing (name, age, country, gender)
-✅ Admin bypass enabled
-✅ Unnecessary commands removed
-✅ Profile setup auto-flow fixed
-✅ Chat forwarding error fixed
-✅ No menu after match
+GhostTalk v5.4 - FULLY PATCHED
+- Fixes for /stop and /next freeze
+- Opposite-gender matching fixed (works with stored "👨 Male" etc.)
+- /search_opposite available to all users (removed premium gate)
+- Disabled unwanted commands: /game, /word, /random
+- Robust queue & state cleanup
 """
 
 import sqlite3
@@ -65,7 +63,7 @@ BANNED_WORDS = [
 LINK_PATTERN = re.compile(r"https?://www.", re.IGNORECASE)
 BANNED_PATTERNS = [re.compile(re.escape(w), re.IGNORECASE) for w in BANNED_WORDS]
 
-# ============ 195 COUNTRIES ============
+# ============ COUNTRIES ============
 COUNTRIES = [
     "afghanistan", "albania", "algeria", "andorra", "angola", "antigua and barbuda",
     "argentina", "armenia", "australia", "austria", "azerbaijan", "bahamas", "bahrain",
@@ -116,6 +114,7 @@ def get_country_info(user_input):
     if normalized in COUNTRY_ALIASES:
         normalized = COUNTRY_ALIASES[normalized]
     if normalized in COUNTRIES:
+        # return proper display name and a simple flag placeholder
         return normalized.title(), "🌍"
     return None
 
@@ -425,13 +424,20 @@ def warn_user(userid, reason):
                 pass
             return "warn"
 
+# ----------------- PATCHED: robust remove_from_queues -----------------
 def remove_from_queues(userid):
+    """Remove user from any search queues and clear their search timestamp."""
     global waiting_random, waiting_premium_opposite
     with queue_lock:
-        if userid in waiting_random:
-            waiting_random.remove(userid)
-        waiting_premium_opposite[:] = [uid for uid in waiting_premium_opposite if uid != userid]
-        search_start_time.pop(userid, None)
+        # filter both queues to ensure userid is not left behind
+        waiting_random = [u for u in waiting_random if u != userid]
+        waiting_premium_opposite = [u for u in waiting_premium_opposite if u != userid]
+        # remove their search start record if present
+        if userid in search_start_time:
+            try:
+                del search_start_time[userid]
+            except KeyError:
+                pass
 
 def is_searching(userid):
     with queue_lock:
@@ -523,66 +529,134 @@ def forward_chat_to_admin(reporter_id, reported_id, report_type):
     except Exception as e:
         logger.error(f"Error forwarding chat: {e}")
 
+# ----------------- helper to clean gender values -----------------
+def _clean_gender_field(g):
+    if not g:
+        return None
+    g = str(g)
+    if "Male" in g:
+        return "Male"
+    if "Female" in g:
+        return "Female"
+    # fallback to normalized title
+    return g.strip().title()
+
+# ----------------- PATCHED: match_users (safer) -----------------
 def match_users():
-    """Match users - FIXED with info display"""
+    """Match users - improved safety and state cleanup"""
     global waiting_random, waiting_premium_opposite, active_pairs
 
+    # First try premium-opposite queue (safe iteration over a copy)
+    with queue_lock:
+        premium_copy = waiting_premium_opposite[:]
+
     i = 0
-    while i < len(waiting_premium_opposite):
-        uid1 = waiting_premium_opposite[i]
+    while i < len(premium_copy):
+        uid1 = premium_copy[i]
         u1 = db_get_user(uid1)
-        if not u1 or not u1.get("gender"):
+        if not u1 or uid1 in active_pairs or db_is_banned(uid1):
             i += 1
             continue
 
-        gender1 = u1.get("gender")
+        gender1 = _clean_gender_field(u1.get("gender"))
+        if not gender1:
+            i += 1
+            continue
+
         needed_gender = "Female" if gender1 == "Male" else "Male"
 
+        # search for a matching opposite in the *live* waiting_premium_opposite list
         with queue_lock:
-            for j in range(i + 1, len(waiting_premium_opposite)):
-                uid2 = waiting_premium_opposite[j]
+            found_idx = None
+            for j, uid2 in enumerate(waiting_premium_opposite):
+                if uid2 == uid1:
+                    continue
                 u2 = db_get_user(uid2)
-                if u2 and u2.get("gender") == needed_gender:
-                    waiting_premium_opposite.pop(j)
-                    waiting_premium_opposite.pop(i)
-                    with active_pairs_lock:
-                        active_pairs[uid1] = uid2
-                        active_pairs[uid2] = uid1
+                if not u2 or uid2 in active_pairs or db_is_banned(uid2):
+                    continue
+                gender2 = _clean_gender_field(u2.get("gender"))
+                if gender2 == needed_gender:
+                    found_idx = j
+                    break
 
-                    try:
-                        # NO MENU - just match message with user info
-                        info2 = f"{u2.get('firstname', 'User')} ({u2.get('age', '?')}) {u2.get('countryflag', '🌍')} {u2.get('country', '?')}"
-                        info1 = f"{u1.get('firstname', 'User')} ({u1.get('age', '?')}) {u1.get('countryflag', '🌍')} {u1.get('country', '?')}"
+            if found_idx is not None:
+                uid2 = waiting_premium_opposite.pop(found_idx)
+                # remove uid1 from the queue (could be at any index)
+                try:
+                    waiting_premium_opposite.remove(uid1)
+                except ValueError:
+                    pass
 
-                        bot.send_message(uid1, f"✅ Matched with {info2}\nLet's chat!")
-                        bot.send_message(uid2, f"✅ Matched with {info1}\nLet's chat!")
-                        logger.info(f"Matched {uid1} ↔ {uid2}")
-                    except:
-                        pass
-                    return
+                # create pair
+                with active_pairs_lock:
+                    active_pairs[uid1] = uid2
+                    active_pairs[uid2] = uid1
+
+                # clear search timestamps
+                search_start_time.pop(uid1, None)
+                search_start_time.pop(uid2, None)
+
+                # notify users with profile info
+                try:
+                    info2 = f"{u2.get('firstname', 'User')} ({u2.get('age', '?')}) {u2.get('countryflag', '🌍')} {u2.get('country', '?')}"
+                    info1 = f"{u1.get('firstname', 'User')} ({u1.get('age', '?')}) {u1.get('countryflag', '🌍')} {u1.get('country', '?')}"
+                    bot.send_message(uid1, f"✅ Matched with {info2}\nLet's chat!")
+                    bot.send_message(uid2, f"✅ Matched with {info1}\nLet's chat!")
+                    logger.info(f"Matched (premium) {uid1} ↔ {uid2}")
+                except Exception:
+                    logger.exception("Error sending match messages (premium)")
+                # continue matching next on updated live queue
+                with queue_lock:
+                    premium_copy = waiting_premium_opposite[:]
+                i = 0
+                continue
         i += 1
 
+    # Now random queue matching (FIFO)
     with queue_lock:
-        while len(waiting_random) >= 2:
+        # clean out banned/invalid users from waiting_random before pairing
+        waiting_random = [u for u in waiting_random if (db_get_user(u) is not None and not db_is_banned(u) and u not in active_pairs)]
+
+    while True:
+        with queue_lock:
+            if len(waiting_random) < 2:
+                break
             u1 = waiting_random.pop(0)
-            u2 = waiting_random.pop(0)
-            with active_pairs_lock:
-                active_pairs[u1] = u2
-                active_pairs[u2] = u1
+            u2 = None
+            # find next valid partner
+            while waiting_random:
+                candidate = waiting_random.pop(0)
+                if candidate == u1 or db_is_banned(candidate) or candidate in active_pairs:
+                    continue
+                u2 = candidate
+                break
 
-            try:
-                u1_data = db_get_user(u1)
-                u2_data = db_get_user(u2)
+        if not u2:
+            # put u1 back if no partner found
+            with queue_lock:
+                if u1 not in waiting_random and u1 not in active_pairs:
+                    waiting_random.insert(0, u1)
+            break
 
-                # NO MENU - just match message with user info
-                info2 = f"{u2_data.get('firstname', 'User')} ({u2_data.get('age', '?')}) {u2_data.get('countryflag', '🌍')} {u2_data.get('country', '?')}"
-                info1 = f"{u1_data.get('firstname', 'User')} ({u1_data.get('age', '?')}) {u1_data.get('countryflag', '🌍')} {u1_data.get('country', '?')}"
+        # pair them
+        with active_pairs_lock:
+            active_pairs[u1] = u2
+            active_pairs[u2] = u1
 
-                bot.send_message(u1, f"✅ Matched with {info2}\nLet's chat!")
-                bot.send_message(u2, f"✅ Matched with {info1}\nLet's chat!")
-                logger.info(f"Matched {u1} ↔ {u2}")
-            except:
-                pass
+        # clear search timestamps
+        search_start_time.pop(u1, None)
+        search_start_time.pop(u2, None)
+
+        try:
+            u1_data = db_get_user(u1) or {}
+            u2_data = db_get_user(u2) or {}
+            info2 = f"{u2_data.get('firstname', 'User')} ({u2_data.get('age', '?')}) {u2_data.get('countryflag', '🌍')} {u2_data.get('country', '?')}"
+            info1 = f"{u1_data.get('firstname', 'User')} ({u1_data.get('age', '?')}) {u1_data.get('countryflag', '🌍')} {u1_data.get('country', '?')}"
+            bot.send_message(u1, f"✅ Matched with {info2}\nLet's chat!")
+            bot.send_message(u2, f"✅ Matched with {info1}\nLet's chat!")
+            logger.info(f"Matched (random) {u1} ↔ {u2}")
+        except Exception:
+            logger.exception("Error sending match messages (random)")
 
 # ============ FLASK ============
 @app.route("/", methods=["GET"])
@@ -594,7 +668,6 @@ def health():
     return {"status": "ok", "timestamp": get_now().isoformat()}, 200
 
 # ============ ADMIN COMMANDS ============
-
 @bot.message_handler(commands=["ban"])
 def cmd_ban(message):
     if message.from_user.id != ADMIN_ID:
@@ -716,10 +789,9 @@ def cmd_prrem(message):
         bot.send_message(ADMIN_ID, "❌ Invalid user ID")
 
 # ============ USER COMMANDS ============
-
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
-    """FIXED: Auto-flow for profile setup"""
+    """Auto-flow for profile setup"""
     user = message.from_user
     db_create_user_if_missing(user)
     if db_is_banned(user.id):
@@ -749,7 +821,7 @@ def cmd_start(message):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("sex_"))
 def callback_set_gender(call):
-    """FIXED: Auto-trigger age after gender"""
+    """Auto-trigger age after gender"""
     uid = call.from_user.id
     db_create_user_if_missing(call.from_user)
     if db_is_banned(uid):
@@ -868,10 +940,7 @@ def cmd_search_opposite(message):
         bot.send_message(uid, "⛔ You're banned.")
         return
 
-    if uid != ADMIN_ID and not db_is_premium(uid):
-        bot.send_message(uid, "💎 Premium feature! 3 friends with /refer to unlock.")
-        return
-
+    # NOTE: removed premium-only gate — opposite search available to all
     u = db_get_user(uid)
     if not u or not u.get("gender") or not u.get("age") or not u.get("country"):
         bot.send_message(uid, "❌ Complete your profile first! Use /start")
@@ -886,7 +955,10 @@ def cmd_search_opposite(message):
         bot.send_message(uid, "⏳ Already searching. Use /stop to cancel.")
         return
 
-    opposite_gen = "Female" if u.get("gender") == "Male" else "Male"
+    # determine opposite gender using cleaned field
+    gender_clean = _clean_gender_field(u.get("gender"))
+    opposite_gen = "Female" if gender_clean == "Male" else "Male"
+
     remove_from_queues(uid)
     with queue_lock:
         waiting_premium_opposite.append(uid)
@@ -898,17 +970,31 @@ def cmd_search_opposite(message):
 @bot.message_handler(commands=["stop"])
 def cmd_stop(message):
     uid = message.from_user.id
+
+    # If searching, cancel cleanly
     if is_searching(uid):
         remove_from_queues(uid)
-        bot.send_message(uid, "🔍 Search cancelled.")
+        try:
+            bot.send_message(uid, "🔍 Search cancelled.")
+        except:
+            pass
         return
 
+    # If chatting, disconnect and notify both sides
     with active_pairs_lock:
         if uid in active_pairs:
             disconnect_user(uid)
+            remove_from_queues(uid)
+            try:
+                bot.send_message(uid, "⛔ Chat stopped.")
+            except:
+                pass
             return
 
-    bot.send_message(uid, "❌ You're not chatting.")
+    try:
+        bot.send_message(uid, "❌ You're not chatting.")
+    except:
+        pass
 
 @bot.message_handler(commands=["next"])
 def cmd_next(message):
@@ -917,13 +1003,24 @@ def cmd_next(message):
         if uid not in active_pairs:
             bot.send_message(uid, "❌ You're not chatting.")
             return
+        # disconnect the current chat
         disconnect_user(uid)
 
+    # ensure any stale queue entries removed
+    remove_from_queues(uid)
+
+    # now enqueue for a fresh search
     bot.send_message(uid, "🔍 Finding new partner...")
     with queue_lock:
-        waiting_random.append(uid)
+        if uid not in waiting_random and uid not in waiting_premium_opposite:
+            waiting_random.append(uid)
         search_start_time[uid] = get_now()
-    match_users()
+
+    # try matching immediately
+    try:
+        match_users()
+    except Exception:
+        logger.exception("Error while trying to match after /next")
 
 @bot.message_handler(commands=["report"])
 def cmd_report(message):
@@ -1106,7 +1203,7 @@ def cmd_help(message):
 
 /start - Setup profile
 /search - Find random chat
-/search_opposite - Opposite gender (Premium)
+/search_opposite - Opposite gender
 /next - Skip partner
 /stop - Exit chat
 /report - Report user
@@ -1133,6 +1230,12 @@ Report abusers immediately."""
 
     bot.send_message(uid, rules_text)
 
+# ----------------- Disable unwanted commands -----------------
+@bot.message_handler(commands=["game", "word", "random", "search_random"])
+def disabled_command(message):
+    bot.send_message(message.chat.id, "❌ This command is disabled.")
+
+# ============ MESSAGE FORWARDING ============
 @bot.message_handler(func=lambda m: m.content_type == "text" and not m.text.startswith("/"))
 def forward_chat(message):
     uid = message.from_user.id
@@ -1374,15 +1477,7 @@ if __name__ == "__main__":
     search_timeout_monitor()
 
     logger.info("=" * 80)
-    logger.info("GhostTalk v5.4 - FINAL FIXED VERSION")
-    logger.info("=" * 80)
-    logger.info("✅ Chat freeze FIXED")
-    logger.info("✅ Match info showing (name, age, country, gender)")
-    logger.info("✅ Admin bypass enabled")
-    logger.info("✅ Unnecessary commands removed")
-    logger.info("✅ Profile setup auto-flow FIXED")
-    logger.info("✅ Chat forwarding error FIXED")
-    logger.info("✅ No menu after match")
+    logger.info("GhostTalk v5.4 - PATCHED")
     logger.info("=" * 80)
 
     flask_thread = threading.Thread(
