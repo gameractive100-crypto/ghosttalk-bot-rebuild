@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-GhostTalk v4.7 - FULLY FIXED
-- NAMES REMOVED from messages
-- MEDIA CONSENT WORKING
-- /REPORT in active chat ✅
-- /STOP fully disconnects ✅
-- /RECONNECT working ✅
+GhostTalk v4.8 - POLLING FIX
+- Added timeout & exception handling
+- Fixed polling freeze
+- All commands now responsive
 """
 
 import sqlite3
@@ -1348,18 +1346,21 @@ def btn_stats(message):
 if __name__ == "__main__":
     init_db()
     cleanup_threads()
-    logger.info("✅ GhostTalk v4.7 STARTED")
+    logger.info("✅ GhostTalk v4.8 STARTED")
     logger.info("✅ FIXES APPLIED:")
-    logger.info("   ✅ NAMES REMOVED from messages")
-    logger.info("   ✅ MEDIA CONSENT FIXED")
-    logger.info("   ✅ /REPORT in active chat")
-    logger.info("   ✅ /STOP fully disconnects")
-    logger.info("   ✅ /RECONNECT working")
+    logger.info("   ✅ POLLING TIMEOUT FIXED")
+    logger.info("   ✅ Exception handling added")
+    logger.info("   ✅ All commands responsive")
     logger.info("✅ PRODUCTION READY")
 
-    try:
-        bot.infinity_polling(none_stop=True)
-    except KeyboardInterrupt:
-        logger.info("🛑 Bot stopped")
-    except Exception as e:
-        logger.error(f"Bot error: {e}")
+    while True:
+        try:
+            logger.info("🔄 Starting polling with timeout...")
+            bot.infinity_polling(timeout=30, long_polling_timeout=30, none_stop=True)
+        except KeyboardInterrupt:
+            logger.info("🛑 Bot stopped manually")
+            break
+        except Exception as e:
+            logger.error(f"❌ Polling error: {e}")
+            logger.info("⏳ Restarting polling in 5 seconds...")
+            time.sleep(5)
