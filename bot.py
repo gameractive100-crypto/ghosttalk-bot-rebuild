@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 . 
 """
 GhostTalk v5.4 - FULLY PATCHED
 - Fixes for /stop and /next freeze
