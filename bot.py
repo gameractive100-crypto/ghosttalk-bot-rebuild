@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-GhostTalk Bot - v4.0
+GhostTalk Bot - v4.1
 A real chat app, by a real developer.
+UPDATED: Report Forwarding + Reconnect Logic + Admin Invisibility
 """
 
 import os
@@ -179,6 +180,16 @@ def init_db():
             reporter_id INTEGER,
             reported_id INTEGER,
             timestamp TEXT
+        )
+        """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user1_id INTEGER,
+            user2_id INTEGER,
+            start_time TEXT,
+            end_time TEXT,
+            messages_log TEXT
         )
         """)
         conn.commit()
@@ -371,6 +382,8 @@ def save_msg(uid, cid, mid):
 
 def user_name(uid):
     u = db_user(uid)
+    if uid == ADMIN_ID:
+        return "👑 Admin"
     if u and u.get("username"):
         return f"@{u['username']}"
     return str(uid)
@@ -393,6 +406,9 @@ def match_users():
         opp = "Male" if gender == "Female" else "Female"
         match_idx = None
         for j, other in enumerate(waiting_random):
+            # SKIP ADMIN - ADMIN INVISIBLE
+            if other == ADMIN_ID:
+                continue
             other_data = db_user(other)
             if other_data and other_data['gender'] == opp:
                 match_idx = j
@@ -412,8 +428,18 @@ def match_users():
             i += 1
     
     while len(waiting_random) >= 2:
-        u1 = waiting_random.pop(0)
-        u2 = waiting_random.pop(0)
+        # SKIP ADMIN FROM RANDOM MATCHING
+        non_admin = [u for u in waiting_random if u != ADMIN_ID]
+        if len(non_admin) < 2:
+            break
+        
+        u1 = non_admin.pop(0)
+        u2 = non_admin.pop(0)
+        
+        # Remove from original list
+        waiting_random.remove(u1)
+        waiting_random.remove(u2)
+        
         active_pairs[u1] = u2
         active_pairs[u2] = u1
         u1_data = db_user(u1)
@@ -435,6 +461,22 @@ def main_kb(uid):
     kb.add("❌ Stop")
     kb.add("⚙️ Settings", "👥 Refer")
     return kb
+
+def main_inline_kb(uid):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(types.InlineKeyboardButton("🔍 Find Someone", callback_data="act:search"))
+    u = db_user(uid)
+    if u and u["gender"]:
+        if is_premium(uid):
+            markup.add(types.InlineKeyboardButton("💕 Opposite Gender", callback_data="act:opp"))
+        else:
+            markup.add(types.InlineKeyboardButton("💎 Premium", callback_data="act:premium"))
+    markup.row(
+        types.InlineKeyboardButton("⚙️ Settings", callback_data="act:settings"),
+        types.InlineKeyboardButton("👥 Refer", callback_data="act:refer")
+    )
+    markup.row(types.InlineKeyboardButton("❌ Stop", callback_data="act:stop"))
+    return markup
 
 def chat_kb():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
@@ -819,7 +861,23 @@ def cmd_report(m):
     if uid not in active_pairs:
         bot.send_message(uid, "Report them while chatting with them")
         return
-    bot.send_message(uid, "Report this person?", reply_markup=report_kb())
+    partner = active_pairs.get(uid)
+    if not partner:
+        bot.send_message(uid, "No one to report")
+        return
+    add_report(uid, partner)
+    cnt = count_reports(partner)
+    if cnt >= REPORTS_FOR_BAN:
+        ban_user(partner, hours=TEMP_BAN_HOURS, reason="Too many reports")
+        try:
+            bot.send_message(partner, f"Banned {TEMP_BAN_HOURS}h. Clean up!")
+        except:
+            pass
+        disc_user(partner)
+        bot.send_message(uid, "✓ Reported & Banned", reply_markup=chat_kb())
+    else:
+        remaining = REPORTS_FOR_BAN - cnt
+        bot.send_message(uid, f"✓ Reported ({cnt}/{REPORTS_FOR_BAN})", reply_markup=chat_kb())
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rep:"))
 def report(call):
@@ -848,12 +906,26 @@ def report(call):
         bot.answer_callback_query(call.id, "Reported")
 
 def disc_user(uid):
-    global active_pairs
+    global active_pairs, last_partner_disconnect
     if uid in active_pairs:
         partner = active_pairs[uid]
         
+        if uid in chat_history:
+            msgs_json = str(chat_history[uid])
+            with get_conn() as conn:
+                conn.execute("""
+                    INSERT INTO chat_conversations (user1_id, user2_id, start_time, end_time, messages_log)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (uid, partner, datetime.utcnow().isoformat(), datetime.utcnow().isoformat(), msgs_json))
+                conn.commit()
+        
+        # ✅ STORE RECONNECT DATA - DONO KO
         last_partner_disconnect[uid] = {
             "partner_id": partner,
+            "disconnect_time": datetime.utcnow()
+        }
+        last_partner_disconnect[partner] = {
+            "partner_id": uid,
             "disconnect_time": datetime.utcnow()
         }
         
@@ -866,11 +938,19 @@ def disc_user(uid):
         except:
             pass
         
+        markup_uid = types.InlineKeyboardMarkup()
+        markup_uid.add(types.InlineKeyboardButton("Report This Person", callback_data=f"report_req:{partner}"))
+        
+        markup_partner = types.InlineKeyboardMarkup()
+        markup_partner.add(types.InlineKeyboardButton("Report This Person", callback_data=f"report_req:{uid}"))
+        
         try:
-            bot.send_message(partner, "They left. Use /reconnect to find them again (5 min window)", reply_markup=main_kb(partner))
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("Report", callback_data=f"report_req:{partner}"))
-            bot.send_message(uid, "Left the chat. Need to report?", reply_markup=markup)
+            bot.send_message(uid, "Chat ended.", reply_markup=markup_uid)
+        except:
+            pass
+        
+        try:
+            bot.send_message(partner, "Chat ended.", reply_markup=markup_partner)
         except:
             pass
         
@@ -889,9 +969,67 @@ def report_req(call):
         if not reported:
             bot.answer_callback_query(call.id, "Invalid", show_alert=True)
             return
-        report_reason_pending[reporter] = reported
-        bot.answer_callback_query(call.id, "Type reason")
-        bot.send_message(reporter, "Why report them?")
+        
+        # ADD REPORT
+        add_report(reporter, reported)
+        cnt = count_reports(reported)
+        
+        # FETCH REPORTED USER DATA
+        reported_user = db_user(reported)
+        reporter_user = db_user(reporter)
+        
+        # BUILD ADMIN MESSAGE WITH FULL DETAILS
+        admin_msg = f"""🚨 REPORT LOGGED
+
+📋 Reporter:
+📱 ID: {reporter}
+👤 Name: {user_name(reporter)}
+
+🚫 Reported User:
+📱 ID: {reported}
+👤 Name: {user_name(reported)}
+👨 Gender: {reported_user['gender'] if reported_user else '?'}
+🎂 Age: {reported_user['age'] if reported_user else '?'}
+🇮🇳 Country: {reported_user['country_flag'] if reported_user else '?'} {reported_user['country'] if reported_user else '?'}
+
+📊 Report Status:
+Total Reports: {cnt}/{REPORTS_FOR_BAN}
+"""
+        if cnt >= REPORTS_FOR_BAN:
+            admin_msg += f"\n⚠️ USER BANNED for {TEMP_BAN_HOURS}h"
+            ban_user(reported, hours=TEMP_BAN_HOURS, reason="Too many reports")
+            try:
+                bot.send_message(reported, f"Banned {TEMP_BAN_HOURS}h. Keep it clean!")
+            except:
+                pass
+            if reported in active_pairs:
+                partner = active_pairs[reported]
+                disc_user(reported)
+        else:
+            remaining = REPORTS_FOR_BAN - cnt
+            admin_msg += f"\n⚠️ {remaining} more reports = AUTO BAN"
+        
+        # SEND TO ADMIN
+        try:
+            bot.send_message(ADMIN_ID, admin_msg)
+        except:
+            pass
+        
+        # FORWARD CHAT HISTORY IF EXISTS
+        if reported in chat_history and len(chat_history[reported]) > 0:
+            try:
+                bot.send_message(ADMIN_ID, f"\n📝 Chat Messages ({len(chat_history[reported])} total):")
+                # Show last 10 messages
+                for cid, mid in chat_history[reported][-10:]:
+                    try:
+                        bot.forward_message(ADMIN_ID, cid, mid)
+                    except:
+                        pass
+            except:
+                pass
+        
+        bot.send_message(reporter, "✓ Reported")
+        bot.answer_callback_query(call.id, "Logged")
     except:
         bot.answer_callback_query(call.id, "Error", show_alert=True)
 
@@ -1157,6 +1295,24 @@ def handler(m):
         cmd_refer(m)
         return
     
+    @bot.callback_query_handler(func=lambda c: c.data.startswith("act:"))
+    def action_handler(call):
+        uid = call.from_user.id
+        _, action = call.data.split(":")
+        
+        if action == "search":
+            cmd_search(call.message)
+        elif action == "opp":
+            cmd_search_opp(call.message)
+        elif action == "premium":
+            bot.answer_callback_query(call.id, "Refer 3 friends to get premium!")
+        elif action == "settings":
+            cmd_settings(call.message)
+        elif action == "refer":
+            cmd_refer(call.message)
+        elif action == "stop":
+            cmd_stop(call.message)
+    
     if has_bad_content(text):
         bot.send_message(uid, "No bad words or links bro")
         return
@@ -1173,7 +1329,7 @@ def handler(m):
         except:
             bot.send_message(uid, "Couldn't send")
     else:
-        bot.send_message(uid, "Not connected. Search someone", reply_markup=main_kb(uid))
+        bot.send_message(uid, "Not connected. Search someone", reply_markup=main_inline_kb(uid))
 
 # Admin
 @bot.message_handler(commands=['pradd'])
@@ -1273,6 +1429,74 @@ def cmd_unban(m):
     except:
         pass
 
+@bot.message_handler(commands=['chatlog'])
+def cmd_chatlog(m):
+    if m.from_user.id != ADMIN_ID:
+        bot.send_message(m.from_user.id, "Admin only")
+        return
+    parts = m.text.split()
+    if len(parts) < 2:
+        bot.reply_to(m, "Usage: /chatlog [user_id|username]")
+        return
+    ident = parts[1]
+    uid = resolve_id(ident)
+    if not uid:
+        bot.reply_to(m, "User not found")
+        return
+    
+    u = db_user(uid)
+    if not u:
+        bot.reply_to(m, "User profile not found")
+        return
+    
+    with get_conn() as conn:
+        convs = conn.execute("""
+            SELECT id, user1_id, user2_id, start_time, end_time, messages_log
+            FROM chat_conversations
+            WHERE user1_id=? OR user2_id=?
+            ORDER BY end_time DESC LIMIT 5
+        """, (uid, uid)).fetchall()
+    
+    with get_conn() as conn:
+        reports = conn.execute("""
+            SELECT reporter_id, COUNT(*) as cnt FROM reports WHERE reported_id=?
+            GROUP BY reporter_id
+        """, (uid,)).fetchall()
+    
+    log_text = f"👤 User Profile:\n"
+    log_text += f"ID: {uid}\n"
+    log_text += f"Gender: {u['gender']}\n"
+    log_text += f"Age: {u['age']}\n"
+    log_text += f"Country: {u['country']} {u['country_flag']}\n"
+    log_text += f"Messages Sent: {u['messages_sent']}\n"
+    log_text += f"Premium: {'Yes ✨' if is_premium(uid) else 'No'}\n"
+    log_text += f"Total Reports: {count_reports(uid)}\n\n"
+    
+    if reports:
+        log_text += "📊 Report Breakdown:\n"
+        for reporter_id, cnt in reports:
+            reporter = db_user(reporter_id)
+            reporter_name = f"@{reporter['username']}" if reporter and reporter['username'] else str(reporter_id)
+            log_text += f"  - {reporter_name}: {cnt} reports\n"
+        log_text += "\n"
+    
+    if convs:
+        log_text += f"💬 Last Conversations:\n"
+        for conv_id, u1, u2, start, end, msgs in convs:
+            partner_id = u2 if u1 == uid else u1
+            partner = db_user(partner_id)
+            partner_name = f"@{partner['username']}" if partner and partner['username'] else str(partner_id)
+            log_text += f"  - With {partner_name} ({partner_id})\n"
+            log_text += f"    Time: {start[:10]}\n"
+        log_text += "\n"
+    else:
+        log_text += "No conversation history\n"
+    
+    if len(log_text) > 4000:
+        log_text = log_text[:3950] + "\n..."
+    
+    bot.send_message(ADMIN_ID, log_text)
+
 def set_cmds():
     try:
         cmds = [
@@ -1285,6 +1509,7 @@ def set_cmds():
             types.BotCommand("refer", "Invite friends"),
             types.BotCommand("settings", "Your profile"),
             types.BotCommand("report", "Report"),
+            types.BotCommand("chatlog", "Admin - Chat log"),
         ]
         bot.set_my_commands(cmds)
     except:
@@ -1306,7 +1531,7 @@ def flask():
 if __name__ == "__main__":
     init_db()
     set_cmds()
-    logger.info("GhostTalk v4.0 - Ready")
+    logger.info("GhostTalk v4.1 - Ready (Report Forwarding + Reconnect + Admin Invisible)")
     
     t = threading.Thread(target=poll, daemon=True)
     t.start()
